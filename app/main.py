@@ -1,0 +1,1409 @@
+"""
+Main FastAPI Application - All API endpoints
+"""
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Request
+from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from typing import List, Optional
+from datetime import datetime, timedelta
+import pandas as pd
+import json
+import io
+
+from . import models, schemas, security, utils
+from .database import engine, get_db
+from .security import (
+    get_password_hash,
+    authenticate_user,
+    create_access_token,
+    get_current_user,
+    require_admin,
+    require_organizer,
+    BLACKLIST_TOKENS
+)
+
+# Create database tables
+models.Base.metadata.create_all(bind=engine)
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Event Management System API",
+    description="API for managing events, attendees, and QR code check-ins",
+    version="1.0.0"
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify exact origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ============= Helper Functions =============
+
+def log_activity(
+    db: Session,
+    user_id: int,
+    action: str,
+    entity_type: str,
+    entity_id: Optional[int] = None,
+    description: str = "",
+    details: Optional[dict] = None
+):
+    """
+    Log user activity for audit trail
+    """
+    # Get user name
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    user_name = user.username if user else "Unknown"
+    
+    log_entry = models.AuditLog(
+        user_id=user_id,
+        user_name=user_name,  # This should be saved
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        description=description,
+        details=details or {}
+    )
+    db.add(log_entry)
+    db.commit()
+
+
+
+# ============= Authentication Endpoints =============
+
+@app.post("/api/auth/login", response_model=schemas.Token)
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    """
+    Login endpoint - Returns JWT token
+    """
+    user = authenticate_user(db, form_data.username, form_data.password)
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.commit()
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=security.settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username},
+        expires_delta=access_token_expires
+    )
+    
+    # Log activity
+    log_activity(db, user, "login", "user", user.id, f"User {user.username} logged in")
+    
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.post("/api/auth/logout")
+async def logout(
+    token: str = Depends(security.oauth2_scheme),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Logout endpoint - Blacklist token
+    """
+    BLACKLIST_TOKENS.add(token)
+    
+    # Log activity
+    log_activity(db, current_user, "logout", "user", current_user.id, f"User {current_user.username} logged out")
+    
+    return {"message": "Successfully logged out"}
+
+
+@app.get("/api/auth/me", response_model=schemas.UserWithClub)
+async def get_me(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get current user information
+    """
+    return current_user
+
+
+# Continue to next message for more endpoints...
+
+# ============= Admin - Club Management =============
+
+@app.post("/api/admin/clubs", response_model=schemas.Club)
+async def create_club(
+    club: schemas.ClubCreate,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: Create a new club
+    """
+    # Check if club name already exists
+    existing = db.query(models.Club).filter(models.Club.name == club.name).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Club name already exists")
+    
+    db_club = models.Club(**club.dict())
+    db.add(db_club)
+    db.commit()
+    db.refresh(db_club)
+    
+    # Log activity
+    log_activity(db, current_user, "create_club", "club", db_club.id, f"Created club: {db_club.name}")
+    
+    return db_club
+
+
+@app.get("/api/admin/clubs", response_model=List[schemas.Club])
+async def list_clubs(
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: List all clubs
+    """
+    clubs = db.query(models.Club).order_by(models.Club.name).all()
+    return clubs
+
+
+@app.put("/api/admin/clubs/{club_id}", response_model=schemas.Club)
+async def update_club(
+    club_id: int,
+    club_update: schemas.ClubUpdate,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: Update club details
+    """
+    db_club = db.query(models.Club).filter(models.Club.id == club_id).first()
+    if not db_club:
+        raise HTTPException(status_code=404, detail="Club not found")
+    
+    # Track changes
+    changes = {}
+    update_data = club_update.dict(exclude_unset=True)
+    
+    for key, value in update_data.items():
+        old_value = getattr(db_club, key)
+        if old_value != value:
+            changes[key] = {"old": str(old_value), "new": str(value)}
+            setattr(db_club, key, value)
+    
+    db.commit()
+    db.refresh(db_club)
+    
+    # Log activity
+    log_activity(
+        db, current_user, "update_club", "club", db_club.id,
+        f"Updated club: {db_club.name}",
+        changes_json=json.dumps(changes)
+    )
+    
+    return db_club
+
+
+@app.delete("/api/admin/clubs/{club_id}")
+async def delete_club(
+    club_id: int,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: Delete/disable a club
+    """
+    db_club = db.query(models.Club).filter(models.Club.id == club_id).first()
+    if not db_club:
+        raise HTTPException(status_code=404, detail="Club not found")
+    
+    db_club.active = False
+    db.commit()
+    
+    # Log activity
+    log_activity(db, current_user, "delete_club", "club", db_club.id, f"Disabled club: {db_club.name}")
+    
+    return {"message": f"Club {db_club.name} has been disabled"}
+
+
+# ============= Admin - User Management =============
+
+@app.post("/api/admin/users", response_model=schemas.User)
+async def create_user(
+    user: schemas.UserCreate,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: Create a new user (club member)
+    """
+    # Check if username exists
+    existing_user = db.query(models.User).filter(models.User.username == user.username).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    
+    # Check if email exists
+    existing_email = db.query(models.User).filter(models.User.email == user.email).first()
+    if existing_email:
+        raise HTTPException(status_code=400, detail="Email already exists")
+    
+    # Validate club_id if organizer
+    if user.role == "organizer" and user.club_id:
+        club = db.query(models.Club).filter(models.Club.id == user.club_id).first()
+        if not club:
+            raise HTTPException(status_code=400, detail="Club not found")
+    
+    # Create user
+    hashed_password = get_password_hash(user.password)
+    db_user = models.User(
+        username=user.username,
+        email=user.email,
+        password_hash=hashed_password,
+        full_name=user.full_name,
+        club_id=user.club_id,
+        role=user.role
+    )
+    
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    # Log activity
+    log_activity(db, current_user, "create_user", "user", db_user.id, f"Created user: {db_user.username} (Role: {db_user.role})")
+    
+    return db_user
+
+
+@app.get("/api/admin/users", response_model=List[schemas.UserWithClub])
+async def list_users(
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: List all users
+    """
+    users = db.query(models.User).order_by(models.User.username).all()
+    return users
+
+
+@app.get("/api/admin/clubs/{club_id}/users", response_model=List[schemas.User])
+async def list_club_users(
+    club_id: int,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: Get all users of a specific club
+    """
+    users = db.query(models.User).filter(models.User.club_id == club_id).all()
+    return users
+
+
+@app.put("/api/admin/users/{user_id}", response_model=schemas.User)
+async def update_user(
+    user_id: int,
+    user_update: schemas.UserUpdate,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: Update user details
+    """
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Track changes
+    changes = {}
+    update_data = user_update.dict(exclude_unset=True)
+    
+    for key, value in update_data.items():
+        if key == "password" and value:
+            # Hash new password
+            db_user.password_hash = get_password_hash(value)
+            changes["password"] = {"old": "****", "new": "****"}
+        else:
+            old_value = getattr(db_user, key)
+            if old_value != value:
+                changes[key] = {"old": str(old_value), "new": str(value)}
+                setattr(db_user, key, value)
+    
+    db.commit()
+    db.refresh(db_user)
+    
+    # Log activity
+    log_activity(
+        db, current_user, "update_user", "user", db_user.id,
+        f"Updated user: {db_user.username}",
+        changes_json=json.dumps(changes)
+    )
+    
+    return db_user
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: Disable a user
+    """
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if db_user.id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot disable yourself")
+    
+    db_user.disabled = True
+    db.commit()
+    
+    # Log activity
+    log_activity(db, current_user, "delete_user", "user", db_user.id, f"Disabled user: {db_user.username}")
+    
+    return {"message": f"User {db_user.username} has been disabled"}
+
+
+# ============= Admin - Activity Logs =============
+
+@app.get("/api/admin/logs", response_model=List[schemas.ActivityLogWithDetails])
+async def get_all_logs(
+    skip: int = 0,
+    limit: int = 100,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: Get all activity logs
+    """
+    logs = db.query(models.ActivityLog).order_by(models.ActivityLog.timestamp.desc()).offset(skip).limit(limit).all()
+    return logs
+
+
+@app.get("/api/admin/clubs/{club_id}/logs", response_model=List[schemas.ActivityLogWithDetails])
+async def get_club_logs(
+    club_id: int,
+    skip: int = 0,
+    limit: int = 100,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: Get activity logs for a specific club
+    """
+    logs = db.query(models.ActivityLog).filter(
+        models.ActivityLog.club_id == club_id
+    ).order_by(models.ActivityLog.timestamp.desc()).offset(skip).limit(limit).all()
+    return logs
+
+
+# Continue to next message for Event and Attendee endpoints...
+
+# ============= Club Member - Dashboard =============
+
+@app.get("/api/club/info", response_model=schemas.Club)
+async def get_club_info(
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Get current user's club information
+    """
+    if not current_user.club_id:
+        raise HTTPException(status_code=404, detail="User not assigned to any club")
+    
+    club = db.query(models.Club).filter(models.Club.id == current_user.club_id).first()
+    if not club:
+        raise HTTPException(status_code=404, detail="Club not found")
+    
+    return club
+
+
+@app.get("/api/club/members", response_model=List[schemas.User])
+async def get_club_members(
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all members of current user's club
+    """
+    if not current_user.club_id:
+        raise HTTPException(status_code=404, detail="User not assigned to any club")
+    
+    members = db.query(models.User).filter(models.User.club_id == current_user.club_id).all()
+    return members
+
+
+@app.get("/api/club/events", response_model=List[schemas.EventWithDetails])
+async def get_club_events(
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all events of current user's club
+    """
+    if not current_user.club_id:
+        raise HTTPException(status_code=404, detail="User not assigned to any club")
+    
+    events = db.query(models.Event).filter(models.Event.club_id == current_user.club_id).all()
+    
+    # Add statistics to each event
+    for event in events:
+        event.total_attendees = db.query(models.Attendee).filter(models.Attendee.event_id == event.id).count()
+        event.checked_in_count = db.query(models.Attendee).filter(
+            models.Attendee.event_id == event.id,
+            models.Attendee.checked_in == True
+        ).count()
+    
+    return events
+
+
+# ============= Events Management =============
+
+@app.post("/api/events", response_model=schemas.Event)
+async def create_event(
+    event: schemas.EventCreate,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new event (club members only)
+    """
+    if not current_user.club_id:
+        raise HTTPException(status_code=400, detail="User must be assigned to a club to create events")
+    
+    db_event = models.Event(
+        club_id=current_user.club_id,
+        created_by=current_user.id,
+        **event.dict()
+    )
+    
+    db.add(db_event)
+    db.commit()
+    db.refresh(db_event)
+    
+    # Log activity
+    log_activity(db, current_user, "create_event", "event", db_event.id, f"Created event: {db_event.name}")
+    
+    return db_event
+
+
+@app.get("/api/events", response_model=List[schemas.EventWithDetails])
+async def list_events(
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    List events (filtered by club for organizers, all for admin)
+    """
+    if current_user.role == "admin":
+        events = db.query(models.Event).all()
+    else:
+        if not current_user.club_id:
+            return []
+        events = db.query(models.Event).filter(models.Event.club_id == current_user.club_id).all()
+    
+    # Add statistics
+    for event in events:
+        event.total_attendees = db.query(models.Attendee).filter(models.Attendee.event_id == event.id).count()
+        event.checked_in_count = db.query(models.Attendee).filter(
+            models.Attendee.event_id == event.id,
+            models.Attendee.checked_in == True
+        ).count()
+    
+    return events
+
+
+@app.get("/api/events/{event_id}", response_model=schemas.EventWithDetails)
+async def get_event(
+    event_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Get event details
+    """
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    # Check access
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Add statistics
+    event.total_attendees = db.query(models.Attendee).filter(models.Attendee.event_id == event.id).count()
+    event.checked_in_count = db.query(models.Attendee).filter(
+        models.Attendee.event_id == event.id,
+        models.Attendee.checked_in == True
+    ).count()
+    
+    return event
+
+
+@app.put("/api/events/{event_id}", response_model=schemas.Event)
+async def update_event(
+    event_id: int,
+    event_update: schemas.EventUpdate,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Update event details
+    """
+    db_event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    
+    if not db_event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    # Check access
+    if current_user.role != "admin" and db_event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Track changes
+    changes = {}
+    update_data = event_update.dict(exclude_unset=True)
+    
+    for key, value in update_data.items():
+        old_value = getattr(db_event, key)
+        if old_value != value:
+            changes[key] = {"old": str(old_value), "new": str(value)}
+            setattr(db_event, key, value)
+    
+    db.commit()
+    db.refresh(db_event)
+    
+    # Log activity
+    log_activity(
+        db, current_user, "update_event", "event", db_event.id,
+        f"Updated event: {db_event.name}",
+        changes_json=json.dumps(changes)
+    )
+    
+    return db_event
+
+
+@app.delete("/api/events/{event_id}")
+async def delete_event(
+    event_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete an event
+    """
+    db_event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    
+    if not db_event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    # Check access
+    if current_user.role != "admin" and db_event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Log activity before deletion
+    log_activity(db, current_user, "delete_event", "event", db_event.id, f"Deleted event: {db_event.name}")
+    
+    db.delete(db_event)
+    db.commit()
+    
+    return {"message": f"Event {db_event.name} has been deleted"}
+
+
+# Continue to next message for Attendee management endpoints...
+
+# ============= Attendee Management =============
+
+@app.get("/api/events/{event_id}/attendees", response_model=List[schemas.AttendeeWithChecker])
+async def get_event_attendees(
+    event_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all attendees for an event
+    """
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    attendees = db.query(models.Attendee).filter(models.Attendee.event_id == event_id).all()
+    return attendees
+
+
+@app.get("/api/events/{event_id}/attendees/template")
+async def download_template(
+    event_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Download CSV template for attendee upload
+    """
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Create template CSV
+    template_data = {
+        'name': ['John Doe', 'Jane Smith'],
+        'email': ['john@example.com', 'jane@example.com'],
+        'roll_number': ['21BCE001', '21BCE002'],
+        'branch': ['CSE', 'ECE'],
+        'year': [3, 2],
+        'section': ['A', 'B'],
+        'phone': ['9876543210', '9876543211'],
+        'gender': ['Male', 'Female']
+    }
+    
+    df = pd.DataFrame(template_data)
+    
+    # Convert to CSV
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_buffer.seek(0)
+    
+    return StreamingResponse(
+        io.BytesIO(csv_buffer.getvalue().encode()),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=attendee_template.csv"}
+    )
+
+
+@app.post("/api/events/{event_id}/attendees/upload")
+async def upload_attendees_csv(
+    event_id: int,
+    file: UploadFile = File(...),
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Bulk upload attendees via CSV
+    """
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Validate file type
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Only CSV files are allowed")
+    
+    try:
+        # Read CSV
+        contents = await file.read()
+        df = pd.read_csv(io.BytesIO(contents))
+        
+        # Validate required columns
+        required_columns = ['name', 'email', 'roll_number', 'branch', 'year', 'section']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing required columns: {', '.join(missing_columns)}"
+            )
+        
+        # Process each row
+        added_count = 0
+        skipped_count = 0
+        errors = []
+        
+        for index, row in df.iterrows():
+            try:
+                # Check if attendee already exists (by email or roll_number)
+                existing = db.query(models.Attendee).filter(
+                    models.Attendee.event_id == event_id,
+                    (models.Attendee.email == row['email']) | (models.Attendee.roll_number == row['roll_number'])
+                ).first()
+                
+                if existing:
+                    skipped_count += 1
+                    errors.append({
+                        "row": index + 2,
+                        "email": row['email'],
+                        "error": "Attendee already exists"
+                    })
+                    continue
+                
+                # Create attendee
+                attendee = models.Attendee(
+                    event_id=event_id,
+                    name=str(row['name']).strip(),
+                    email=str(row['email']).strip().lower(),
+                    roll_number=str(row['roll_number']).strip().upper(),
+                    branch=str(row['branch']).strip().upper(),
+                    year=int(row['year']),
+                    section=str(row['section']).strip().upper(),
+                    phone=str(row.get('phone', '')).strip() if pd.notna(row.get('phone')) else None,
+                    gender=str(row.get('gender', 'Not Specified')).strip() if pd.notna(row.get('gender')) else 'Not Specified'
+                )
+                
+                db.add(attendee)
+                added_count += 1
+            
+            except Exception as e:
+                errors.append({
+                    "row": index + 2,
+                    "email": row.get('email', 'N/A'),
+                    "error": str(e)
+                })
+                skipped_count += 1
+        
+        db.commit()
+        
+        # Log activity
+        log_activity(
+            db, current_user, "upload_attendees", "event", event_id,
+            f"Uploaded {added_count} attendees to event: {event.name}"
+        )
+        
+        return {
+            "message": f"Upload complete: {added_count} added, {skipped_count} skipped",
+            "added": added_count,
+            "skipped": skipped_count,
+            "errors": errors[:20]  # Return first 20 errors only
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error processing CSV: {str(e)}")
+
+
+@app.put("/api/attendees/{attendee_id}", response_model=schemas.Attendee)
+async def update_attendee(
+    attendee_id: int,
+    attendee_update: schemas.AttendeeUpdate,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Update attendee details
+    """
+    attendee = db.query(models.Attendee).filter(models.Attendee.id == attendee_id).first()
+    
+    if not attendee:
+        raise HTTPException(status_code=404, detail="Attendee not found")
+    
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == attendee.event_id).first()
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Track changes
+    changes = {}
+    update_data = attendee_update.dict(exclude_unset=True)
+    
+    for key, value in update_data.items():
+        old_value = getattr(attendee, key)
+        if old_value != value:
+            changes[key] = {"old": str(old_value), "new": str(value)}
+            setattr(attendee, key, value)
+    
+    db.commit()
+    db.refresh(attendee)
+    
+    # Log activity
+    log_activity(
+        db, current_user, "update_attendee", "attendee", attendee.id,
+        f"Updated attendee: {attendee.name} ({attendee.email})",
+        changes_json=json.dumps(changes)
+    )
+    
+    return attendee
+
+
+@app.delete("/api/attendees/{attendee_id}")
+async def delete_attendee(
+    attendee_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete an attendee
+    """
+    attendee = db.query(models.Attendee).filter(models.Attendee.id == attendee_id).first()
+    
+    if not attendee:
+        raise HTTPException(status_code=404, detail="Attendee not found")
+    
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == attendee.event_id).first()
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Log activity
+    log_activity(
+        db, current_user, "delete_attendee", "attendee", attendee.id,
+        f"Deleted attendee: {attendee.name} ({attendee.email})"
+    )
+    
+    db.delete(attendee)
+    db.commit()
+    
+    return {"message": "Attendee deleted successfully"}
+
+
+# Continue to next message for QR generation and check-in endpoints...
+
+# ============= QR Code Generation & Email =============
+
+@app.post("/api/events/{event_id}/generate-qr", response_model=schemas.BulkQRGenerateResponse)
+async def generate_and_send_qr(
+    event_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate QR codes and send via email (smart - only processes pending/failed)
+    """
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Get attendees that need QR generation or email sending
+    # (qr_generated = False OR email_sent = False)
+    attendees = db.query(models.Attendee).filter(
+        models.Attendee.event_id == event_id,
+        (models.Attendee.qr_generated == False) | (models.Attendee.email_sent == False)
+    ).all()
+    
+    if not attendees:
+        return {
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "errors": []
+        }
+    
+    total = len(attendees)
+    success = 0
+    failed = 0
+    errors = []
+    
+    for attendee in attendees:
+        try:
+            # Generate QR token if not already generated
+            if not attendee.qr_generated or not attendee.qr_token:
+                qr_token = utils.generate_qr_token(
+                    event_id=event.id,
+                    attendee_id=attendee.id,
+                    email=attendee.email,
+                    roll_number=attendee.roll_number,
+                    event_date=event.date
+                )
+                attendee.qr_token = qr_token
+                attendee.qr_generated = True
+                attendee.qr_generated_at = datetime.utcnow()
+            
+            # Send email if not already sent
+            if not attendee.email_sent:
+                # Generate QR code image
+                qr_code_bytes = utils.generate_qr_code(
+                    token=attendee.qr_token,
+                    attendee_name=attendee.name,
+                    event_name=event.name
+                )
+                
+                # Send email
+                email_success, error_msg = utils.send_qr_email(
+                    to_email=attendee.email,
+                    attendee_name=attendee.name,
+                    event_name=event.name,
+                    event_date=event.date,
+                    event_venue=event.venue or "TBA",
+                    qr_code_bytes=qr_code_bytes
+                )
+                
+                if email_success:
+                    attendee.email_sent = True
+                    attendee.email_sent_at = datetime.utcnow()
+                    attendee.email_error = None
+                    success += 1
+                else:
+                    attendee.email_error = error_msg
+                    failed += 1
+                    errors.append({
+                        "attendee_id": attendee.id,
+                        "name": attendee.name,
+                        "email": attendee.email,
+                        "error": error_msg
+                    })
+            else:
+                success += 1
+            
+            db.commit()
+        
+        except Exception as e:
+            failed += 1
+            error_msg = str(e)
+            attendee.email_error = error_msg
+            db.commit()
+            
+            errors.append({
+                "attendee_id": attendee.id,
+                "name": attendee.name,
+                "email": attendee.email,
+                "error": error_msg
+            })
+    
+    # Log activity
+    log_activity(
+        db, current_user, "generate_qr", "event", event_id,
+        f"Generated QR codes for {success} attendees in event: {event.name}"
+    )
+    
+    return {
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "errors": errors[:20]  # Return first 20 errors
+    }
+
+
+@app.post("/api/attendees/{attendee_id}/resend-qr")
+async def resend_qr_to_attendee(
+    attendee_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Resend QR code to a specific attendee
+    """
+    attendee = db.query(models.Attendee).filter(models.Attendee.id == attendee_id).first()
+    
+    if not attendee:
+        raise HTTPException(status_code=404, detail="Attendee not found")
+    
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == attendee.event_id).first()
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    try:
+        # Generate QR token if not exists
+        if not attendee.qr_token:
+            qr_token = utils.generate_qr_token(
+                event_id=event.id,
+                attendee_id=attendee.id,
+                email=attendee.email,
+                roll_number=attendee.roll_number,
+                event_date=event.date
+            )
+            attendee.qr_token = qr_token
+            attendee.qr_generated = True
+            attendee.qr_generated_at = datetime.utcnow()
+        
+        # Generate QR code image
+        qr_code_bytes = utils.generate_qr_code(
+            token=attendee.qr_token,
+            attendee_name=attendee.name,
+            event_name=event.name
+        )
+        
+        # Send email
+        email_success, error_msg = utils.send_qr_email(
+            to_email=attendee.email,
+            attendee_name=attendee.name,
+            event_name=event.name,
+            event_date=event.date,
+            event_venue=event.venue or "TBA",
+            qr_code_bytes=qr_code_bytes
+        )
+        
+        if email_success:
+            attendee.email_sent = True
+            attendee.email_sent_at = datetime.utcnow()
+            attendee.email_error = None
+            db.commit()
+            
+            # Log activity
+            log_activity(
+                db, current_user, "resend_qr", "attendee", attendee_id,
+                f"Resent QR code to: {attendee.name} ({attendee.email})"
+            )
+            
+            return {"message": "QR code sent successfully", "success": True}
+        else:
+            attendee.email_error = error_msg
+            db.commit()
+            raise HTTPException(status_code=500, detail=f"Failed to send email: {error_msg}")
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============= Check-in Endpoints =============
+
+@app.post("/api/checkin/scan", response_model=schemas.CheckInResponse)
+async def scan_qr_checkin(
+    checkin_request: schemas.CheckInRequest,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Scan QR code and check-in attendee
+    """
+    try:
+        # Verify QR token
+        payload = utils.verify_qr_token(checkin_request.qr_token)
+        
+        event_id = payload.get("event_id")
+        attendee_id = payload.get("attendee_id")
+        
+        # Get event
+        event = db.query(models.Event).filter(models.Event.id == event_id).first()
+        if not event:
+            return {
+                "success": False,
+                "message": "Event not found",
+                "attendee": None
+            }
+        
+        # Check access
+        if current_user.role != "admin" and event.club_id != current_user.club_id:
+            return {
+                "success": False,
+                "message": "Access denied - Not authorized for this event",
+                "attendee": None
+            }
+        
+        # Get attendee
+        attendee = db.query(models.Attendee).filter(models.Attendee.id == attendee_id).first()
+        if not attendee:
+            return {
+                "success": False,
+                "message": "Attendee not found",
+                "attendee": None
+            }
+        
+        # Check if already checked in
+        if attendee.checked_in:
+            return {
+                "success": False,
+                "message": f"Already checked in at {attendee.checkin_time.strftime('%I:%M %p')}",
+                "attendee": attendee
+            }
+        
+        # Check-in
+        attendee.checked_in = True
+        attendee.checkin_time = datetime.utcnow()
+        attendee.checked_by = current_user.id
+        db.commit()
+        db.refresh(attendee)
+        
+        # Log activity
+        log_activity(
+            db, current_user, "checkin_scan", "attendee", attendee.id,
+            f"Checked in: {attendee.name} ({attendee.roll_number}) via QR scan"
+        )
+        
+        return {
+            "success": True,
+            "message": f"Successfully checked in: {attendee.name}",
+            "attendee": attendee
+        }
+    
+    except ValueError as e:
+        return {
+            "success": False,
+            "message": f"Invalid QR code: {str(e)}",
+            "attendee": None
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error: {str(e)}",
+            "attendee": None
+        }
+
+
+@app.post("/api/attendees/{attendee_id}/checkin-manual")
+async def manual_checkin(
+    attendee_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Manual check-in for an attendee
+    """
+    attendee = db.query(models.Attendee).filter(models.Attendee.id == attendee_id).first()
+    
+    if not attendee:
+        raise HTTPException(status_code=404, detail="Attendee not found")
+    
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == attendee.event_id).first()
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Check if already checked in
+    if attendee.checked_in:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Already checked in at {attendee.checkin_time.strftime('%I:%M %p')}"
+        )
+    
+    # Check-in
+    attendee.checked_in = True
+    attendee.checkin_time = datetime.utcnow()
+    attendee.checked_by = current_user.id
+    db.commit()
+    
+    # Log activity
+    log_activity(
+        db, current_user, "checkin_manual", "attendee", attendee.id,
+        f"Manually checked in: {attendee.name} ({attendee.roll_number})"
+    )
+    
+    return {"message": f"Successfully checked in: {attendee.name}"}
+
+
+# Continue to next message for Dashboard and Export endpoints...
+
+# ============= Dashboard with Segregation =============
+
+@app.get("/api/events/{event_id}/dashboard")
+async def get_event_dashboard(
+    event_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Get event dashboard with segregated attendee data (Branch -> Year -> Section)
+    """
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Get all attendees
+    attendees = db.query(models.Attendee).filter(models.Attendee.event_id == event_id).all()
+    
+    # Calculate overall stats
+    total_attendees = len(attendees)
+    checked_in = sum(1 for a in attendees if a.checked_in)
+    not_checked_in = total_attendees - checked_in
+    qr_generated = sum(1 for a in attendees if a.qr_generated)
+    qr_pending = total_attendees - qr_generated
+    email_sent = sum(1 for a in attendees if a.email_sent)
+    email_failed = sum(1 for a in attendees if a.email_error)
+    
+    stats = {
+        "total_attendees": total_attendees,
+        "checked_in": checked_in,
+        "not_checked_in": not_checked_in,
+        "qr_generated": qr_generated,
+        "qr_pending": qr_pending,
+        "email_sent": email_sent,
+        "email_failed": email_failed
+    }
+    
+    # Segregate by Branch -> Year -> Section
+    groups = {}
+    
+    for attendee in attendees:
+        branch = attendee.branch
+        year = str(attendee.year)
+        section = attendee.section
+        
+        # Initialize branch if not exists
+        if branch not in groups:
+            groups[branch] = {
+                "total": 0,
+                "checked_in": 0,
+                "years": {}
+            }
+        
+        # Initialize year if not exists
+        if year not in groups[branch]["years"]:
+            groups[branch]["years"][year] = {
+                "total": 0,
+                "checked_in": 0,
+                "sections": {}
+            }
+        
+        # Initialize section if not exists
+        if section not in groups[branch]["years"][year]["sections"]:
+            groups[branch]["years"][year]["sections"][section] = {
+                "total": 0,
+                "checked_in": 0,
+                "attendees": []
+            }
+        
+        # Add attendee to section
+        attendee_data = {
+            "id": attendee.id,
+            "name": attendee.name,
+            "email": attendee.email,
+            "roll_number": attendee.roll_number,
+            "phone": attendee.phone,
+            "gender": attendee.gender,
+            "checked_in": attendee.checked_in,
+            "checkin_time": attendee.checkin_time.isoformat() if attendee.checkin_time else None,
+            "checked_by": attendee.checked_by,
+            "checker_name": attendee.checker.username if attendee.checker else None,
+            "qr_generated": attendee.qr_generated,
+            "email_sent": attendee.email_sent,
+            "email_error": attendee.email_error
+        }
+        
+        groups[branch]["years"][year]["sections"][section]["attendees"].append(attendee_data)
+        
+        # Update counts
+        groups[branch]["total"] += 1
+        groups[branch]["years"][year]["total"] += 1
+        groups[branch]["years"][year]["sections"][section]["total"] += 1
+        
+        if attendee.checked_in:
+            groups[branch]["checked_in"] += 1
+            groups[branch]["years"][year]["checked_in"] += 1
+            groups[branch]["years"][year]["sections"][section]["checked_in"] += 1
+    
+    return {
+        "event": {
+            "id": event.id,
+            "name": event.name,
+            "date": event.date.isoformat(),
+            "venue": event.venue
+        },
+        "stats": stats,
+        "groups": groups
+    }
+
+
+# ============= Export CSV =============
+
+@app.get("/api/events/{event_id}/export")
+async def export_attendees_csv(
+    event_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Export all attendees as CSV with check-in details
+    """
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Get all attendees with checker info
+    attendees = db.query(models.Attendee).filter(models.Attendee.event_id == event_id).all()
+    
+    # Prepare data for CSV
+    csv_data = []
+    for attendee in attendees:
+        csv_data.append({
+            'Name': attendee.name,
+            'Email': attendee.email,
+            'Roll Number': attendee.roll_number,
+            'Branch': attendee.branch,
+            'Year': attendee.year,
+            'Section': attendee.section,
+            'Phone': attendee.phone or '',
+            'Gender': attendee.gender,
+            'Checked In': 'Yes' if attendee.checked_in else 'No',
+            'Check-in Time': attendee.checkin_time.strftime('%Y-%m-%d %I:%M %p') if attendee.checkin_time else '',
+            'Checked By': attendee.checker.username if attendee.checker else '',
+            'QR Generated': 'Yes' if attendee.qr_generated else 'No',
+            'Email Sent': 'Yes' if attendee.email_sent else 'No',
+            'Email Error': attendee.email_error or ''
+        })
+    
+    # Create DataFrame
+    df = pd.DataFrame(csv_data)
+    
+    # Sort by branch, year, section, name
+    df = df.sort_values(['Branch', 'Year', 'Section', 'Name'])
+    
+    # Convert to CSV
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_buffer.seek(0)
+    
+    # Log activity
+    log_activity(
+        db, current_user, "export_csv", "event", event_id,
+        f"Exported attendees for event: {event.name}"
+    )
+    
+    # Return CSV file
+    return StreamingResponse(
+        io.BytesIO(csv_buffer.getvalue().encode()),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={event.name.replace(' ', '_')}_attendees.csv"}
+    )
+
+
+# ============= Health Check =============
+
+@app.get("/")
+async def root():
+    """
+    Health check endpoint
+    """
+    return {
+        "message": "Event Management System API",
+        "status": "running",
+        "version": "1.0.0"
+    }
+
+
+@app.get("/health")
+async def health_check(db: Session = Depends(get_db)):
+    """
+    Health check with database connection test
+    """
+    try:
+        # Test database connection using SQLAlchemy 2.0 syntax
+        from sqlalchemy import text
+        db.execute(text("SELECT 1"))
+        return {
+            "status": "healthy",
+            "database": "connected"
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "database": "disconnected",
+            "error": str(e)
+        }
