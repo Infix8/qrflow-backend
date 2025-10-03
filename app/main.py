@@ -35,10 +35,15 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware
+# CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "https://qrflow-frontend-gcv0w3nm2-infix8s-projects.vercel.app/",  # Add your Vercel domain
+        "https://qrflow.yourdomain.com",           # Add custom domain if you have one
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

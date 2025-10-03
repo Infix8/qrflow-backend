@@ -33,26 +33,26 @@ FastAPI backend for QR code-based event management system.
 git clone https://github.com/yourusername/qrflow-backend.git
 cd qrflow-backend
 
-text
+
 
 2. **Configure environment**
 
 cp .env.example .env
 nano .env # Update with your settings
 
-text
+
 
 3. **Start services**
 
 docker-compose up -d
 
-text
+
 
 4. **Initialize database**
 
 ./init_db.sh
 
-text
+
 
 5. **Access the application**
 - API: http://localhost:8000
@@ -78,7 +78,7 @@ text
 
 ssh -i your-key.pem ubuntu@your-ec2-ip
 
-text
+
 
 ### 3. Install Docker
 
@@ -98,7 +98,7 @@ Add user to docker group
 sudo usermod -aG docker ubuntu
 newgrp docker
 
-text
+
 
 ### 4. Clone & Deploy
 
@@ -124,7 +124,7 @@ Check logs
 
 docker-compose logs -f
 
-text
+
 
 ### 5. Setup Nginx (Optional)
 
@@ -133,7 +133,7 @@ Create Nginx config
 
 sudo nano /etc/nginx/sites-available/qrflow
 
-text
+
 
 Paste:
 
@@ -141,7 +141,7 @@ server {
 listen 80;
 server_name your-domain.com;
 
-text
+
 location / {
     proxy_pass http://localhost:8000;
     proxy_set_header Host $host;
@@ -150,7 +150,7 @@ location / {
 
 }
 
-text
+
 
 Enable:
 
@@ -158,7 +158,7 @@ sudo ln -s /etc/nginx/sites-available/qrflow /etc/nginx/sites-enabled/
 sudo nginx -t
 sudo systemctl restart nginx
 
-text
+
 
 ## API Endpoints
 
@@ -212,7 +212,7 @@ Restore database
 
 docker-compose exec -T db psql -U qrflow_user qrflow_db < backup.sql
 
-text
+
 
 ## Troubleshooting
 
@@ -221,14 +221,14 @@ text
 docker-compose logs db
 docker-compose exec db psql -U qrflow_user -d qrflow_db
 
-text
+
 
 ### Backend Not Starting
 
 docker-compose logs backend
 docker-compose exec backend python init_db.py
 
-text
+
 
 ## License
 
