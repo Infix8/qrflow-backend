@@ -77,7 +77,7 @@ text
 
 Clone from GitHub
 
-git clone https://github.com/YOUR_USERNAME/qrflow-backend.git
+git clone https://github.com/Infix8/qrflow-backend.git
 cd qrflow-backend
 
 text

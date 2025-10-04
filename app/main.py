@@ -41,8 +41,10 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:8080",
         "http://127.0.0.1:8080",
-        "https://qrflow-frontend-gcv0w3nm2-infix8s-projects.vercel.app/",  # Add your Vercel domain
-        "https://qrflow.yourdomain.com",           # Add custom domain if you have one
+        "http://localhost:3000",  # Vite dev server
+        "https://qrflow-frontend-gcv0w3nm2-infix8s-projects.vercel.app",  # Vercel domain
+        "https://qrflow-frontend.vercel.app/",           # Custom domain
+        "https://*.vercel.app",                   # All Vercel domains
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -68,14 +70,13 @@ def log_activity(
     user = db.query(models.User).filter(models.User.id == user_id).first()
     user_name = user.username if user else "Unknown"
     
-    log_entry = models.AuditLog(
+    log_entry = models.ActivityLog(
         user_id=user_id,
-        user_name=user_name,  # This should be saved
-        action=action,
+        action_type=action,
         entity_type=entity_type,
         entity_id=entity_id,
         description=description,
-        details=details or {}
+        changes_json=json.dumps(details) if details else None
     )
     db.add(log_entry)
     db.commit()
@@ -113,7 +114,7 @@ async def login(
     )
     
     # Log activity
-    log_activity(db, user, "login", "user", user.id, f"User {user.username} logged in")
+    log_activity(db, user.id, "login", "user", user.id, f"User {user.username} logged in")
     
     return {"access_token": access_token, "token_type": "bearer"}
 
@@ -130,7 +131,7 @@ async def logout(
     BLACKLIST_TOKENS.add(token)
     
     # Log activity
-    log_activity(db, current_user, "logout", "user", current_user.id, f"User {current_user.username} logged out")
+    log_activity(db, current_user.id, "logout", "user", current_user.id, f"User {current_user.username} logged out")
     
     return {"message": "Successfully logged out"}
 
@@ -170,7 +171,7 @@ async def create_club(
     db.refresh(db_club)
     
     # Log activity
-    log_activity(db, current_user, "create_club", "club", db_club.id, f"Created club: {db_club.name}")
+    log_activity(db, current_user.id, "create_club", "club", db_club.id, f"Created club: {db_club.name}")
     
     return db_club
 
@@ -216,9 +217,9 @@ async def update_club(
     
     # Log activity
     log_activity(
-        db, current_user, "update_club", "club", db_club.id,
+        db, current_user.id, "update_club", "club", db_club.id,
         f"Updated club: {db_club.name}",
-        changes_json=json.dumps(changes)
+        changes
     )
     
     return db_club
@@ -241,7 +242,7 @@ async def delete_club(
     db.commit()
     
     # Log activity
-    log_activity(db, current_user, "delete_club", "club", db_club.id, f"Disabled club: {db_club.name}")
+    log_activity(db, current_user.id, "delete_club", "club", db_club.id, f"Disabled club: {db_club.name}")
     
     return {"message": f"Club {db_club.name} has been disabled"}
 
@@ -289,7 +290,7 @@ async def create_user(
     db.refresh(db_user)
     
     # Log activity
-    log_activity(db, current_user, "create_user", "user", db_user.id, f"Created user: {db_user.username} (Role: {db_user.role})")
+    log_activity(db, current_user.id, "create_user", "user", db_user.id, f"Created user: {db_user.username} (Role: {db_user.role})")
     
     return db_user
 
@@ -353,9 +354,9 @@ async def update_user(
     
     # Log activity
     log_activity(
-        db, current_user, "update_user", "user", db_user.id,
+        db, current_user.id, "update_user", "user", db_user.id,
         f"Updated user: {db_user.username}",
-        changes_json=json.dumps(changes)
+        changes
     )
     
     return db_user
@@ -381,7 +382,7 @@ async def delete_user(
     db.commit()
     
     # Log activity
-    log_activity(db, current_user, "delete_user", "user", db_user.id, f"Disabled user: {db_user.username}")
+    log_activity(db, current_user.id, "delete_user", "user", db_user.id, f"Disabled user: {db_user.username}")
     
     return {"message": f"User {db_user.username} has been disabled"}
 
@@ -505,7 +506,7 @@ async def create_event(
     db.refresh(db_event)
     
     # Log activity
-    log_activity(db, current_user, "create_event", "event", db_event.id, f"Created event: {db_event.name}")
+    log_activity(db, current_user.id, "create_event", "event", db_event.id, f"Created event: {db_event.name}")
     
     return db_event
 
@@ -598,9 +599,9 @@ async def update_event(
     
     # Log activity
     log_activity(
-        db, current_user, "update_event", "event", db_event.id,
+        db, current_user.id, "update_event", "event", db_event.id,
         f"Updated event: {db_event.name}",
-        changes_json=json.dumps(changes)
+        changes
     )
     
     return db_event
@@ -625,7 +626,7 @@ async def delete_event(
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Log activity before deletion
-    log_activity(db, current_user, "delete_event", "event", db_event.id, f"Deleted event: {db_event.name}")
+    log_activity(db, current_user.id, "delete_event", "event", db_event.id, f"Deleted event: {db_event.name}")
     
     db.delete(db_event)
     db.commit()
@@ -788,7 +789,7 @@ async def upload_attendees_csv(
         
         # Log activity
         log_activity(
-            db, current_user, "upload_attendees", "event", event_id,
+            db, current_user.id, "upload_attendees", "event", event_id,
             f"Uploaded {added_count} attendees to event: {event.name}"
         )
         
@@ -838,9 +839,9 @@ async def update_attendee(
     
     # Log activity
     log_activity(
-        db, current_user, "update_attendee", "attendee", attendee.id,
+        db, current_user.id, "update_attendee", "attendee", attendee.id,
         f"Updated attendee: {attendee.name} ({attendee.email})",
-        changes_json=json.dumps(changes)
+        changes
     )
     
     return attendee
@@ -867,7 +868,7 @@ async def delete_attendee(
     
     # Log activity
     log_activity(
-        db, current_user, "delete_attendee", "attendee", attendee.id,
+        db, current_user.id, "delete_attendee", "attendee", attendee.id,
         f"Deleted attendee: {attendee.name} ({attendee.email})"
     )
     
@@ -986,7 +987,7 @@ async def generate_and_send_qr(
     
     # Log activity
     log_activity(
-        db, current_user, "generate_qr", "event", event_id,
+        db, current_user.id, "generate_qr", "event", event_id,
         f"Generated QR codes for {success} attendees in event: {event.name}"
     )
     
@@ -1056,7 +1057,7 @@ async def resend_qr_to_attendee(
             
             # Log activity
             log_activity(
-                db, current_user, "resend_qr", "attendee", attendee_id,
+                db, current_user.id, "resend_qr", "attendee", attendee_id,
                 f"Resent QR code to: {attendee.name} ({attendee.email})"
             )
             
@@ -1131,7 +1132,7 @@ async def scan_qr_checkin(
         
         # Log activity
         log_activity(
-            db, current_user, "checkin_scan", "attendee", attendee.id,
+            db, current_user.id, "checkin_scan", "attendee", attendee.id,
             f"Checked in: {attendee.name} ({attendee.roll_number}) via QR scan"
         )
         
@@ -1189,7 +1190,7 @@ async def manual_checkin(
     
     # Log activity
     log_activity(
-        db, current_user, "checkin_manual", "attendee", attendee.id,
+        db, current_user.id, "checkin_manual", "attendee", attendee.id,
         f"Manually checked in: {attendee.name} ({attendee.roll_number})"
     )
     
@@ -1367,7 +1368,7 @@ async def export_attendees_csv(
     
     # Log activity
     log_activity(
-        db, current_user, "export_csv", "event", event_id,
+        db, current_user.id, "export_csv", "event", event_id,
         f"Exported attendees for event: {event.name}"
     )
     
