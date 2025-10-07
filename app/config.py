@@ -9,7 +9,7 @@ load_dotenv()
 
 class Settings:
     # Database
-    DATABASE_URL: str = os.getenv("DATABASE_URL")
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://qrflow_user:password@localhost:5432/qrflow_db")
     
     # JWT
     SECRET_KEY: str = os.getenv("SECRET_KEY", "change_this_secret_key_in_production")
@@ -23,6 +23,12 @@ class Settings:
     SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
     SMTP_FROM_EMAIL: str = os.getenv("SMTP_FROM_EMAIL", "")
     SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "Event Management System")
+    
+    # Razorpay
+    RAZORPAY_KEY_ID: str = os.getenv("RAZORPAY_KEY_ID", "")
+    RAZORPAY_KEY_SECRET: str = os.getenv("RAZORPAY_KEY_SECRET", "")
+    RAZORPAY_WEBHOOK_SECRET: str = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
+    RAZORPAY_WEBHOOK_URL: str = os.getenv("RAZORPAY_WEBHOOK_URL", "")
     
     # Application
     APP_NAME: str = os.getenv("APP_NAME", "Event Management System")

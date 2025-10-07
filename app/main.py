@@ -12,6 +12,9 @@ from datetime import datetime, timedelta
 import pandas as pd
 import json
 import io
+import razorpay
+import hmac
+import hashlib
 
 from . import models, schemas, security, utils
 from .database import engine, get_db
@@ -24,9 +27,22 @@ from .security import (
     require_organizer,
     BLACKLIST_TOKENS
 )
+from .config import settings
 
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
+
+# Initialize Razorpay client (lazy initialization)
+def get_razorpay_client():
+    """Get Razorpay client with proper error handling"""
+    if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
+        raise HTTPException(
+            status_code=500, 
+            detail="Razorpay credentials not configured"
+        )
+    return razorpay.Client(
+        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+    )
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -80,6 +96,25 @@ def log_activity(
     )
     db.add(log_entry)
     db.commit()
+
+
+def verify_razorpay_webhook_signature(payload: str, signature: str) -> bool:
+    """
+    Verify Razorpay webhook signature
+    """
+    try:
+        if not settings.RAZORPAY_WEBHOOK_SECRET:
+            return False
+            
+        expected_signature = hmac.new(
+            settings.RAZORPAY_WEBHOOK_SECRET.encode('utf-8'),
+            payload.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        return hmac.compare_digest(signature, expected_signature)
+    except Exception:
+        return False
 
 
 
@@ -1378,6 +1413,238 @@ async def export_attendees_csv(
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={event.name.replace(' ', '_')}_attendees.csv"}
     )
+
+
+# ============= Razorpay Webhook =============
+
+@app.post("/api/webhooks/razorpay")
+async def razorpay_webhook(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Razorpay webhook endpoint to receive payment notifications
+    """
+    try:
+        # Get raw body and signature
+        body = await request.body()
+        signature = request.headers.get("X-Razorpay-Signature", "")
+        
+        # Verify webhook signature
+        if not verify_razorpay_webhook_signature(body.decode('utf-8'), signature):
+            raise HTTPException(status_code=400, detail="Invalid webhook signature")
+        
+        # Parse webhook data
+        try:
+            webhook_data = json.loads(body.decode('utf-8'))
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+            
+        event_type = webhook_data.get("event")
+        
+        if event_type == "payment.captured":
+            # Handle successful payment
+            payment_data = webhook_data.get("payload", {}).get("payment", {})
+            payment_id = payment_data.get("id")
+            
+            # Find existing payment record
+            payment = db.query(models.Payment).filter(
+                models.Payment.razorpay_payment_id == payment_id
+            ).first()
+            
+            if payment:
+                # Update payment status
+                payment.status = "captured"
+                payment.payment_captured_at = datetime.utcnow()
+                payment.razorpay_signature = signature
+                db.commit()
+                
+                # Log activity (use system user ID 1 or create a webhook user)
+                try:
+                    log_activity(
+                        db, 1, "payment_captured", "payment", payment.id,
+                        f"Payment captured: {payment.customer_name} ({payment.customer_email}) - ₹{payment.amount/100}"
+                    )
+                except Exception:
+                    pass  # Don't fail webhook if logging fails
+                
+                return {"status": "success", "message": "Payment captured successfully"}
+            else:
+                # Create new payment record from webhook data
+                # Try to extract event_id from payment notes or form data
+                event_id = 1  # Default fallback
+                notes = payment_data.get("notes", {})
+                if isinstance(notes, dict):
+                    event_id = notes.get("event_id", 1)
+                elif isinstance(notes, str):
+                    try:
+                        notes_dict = json.loads(notes)
+                        event_id = notes_dict.get("event_id", 1)
+                    except:
+                        pass
+                
+                new_payment = models.Payment(
+                    event_id=event_id,
+                    razorpay_payment_id=payment_id,
+                    amount=payment_data.get("amount", 0),
+                    currency=payment_data.get("currency", "INR"),
+                    status="captured",
+                    customer_name=payment_data.get("notes", {}).get("name", "Unknown") if isinstance(payment_data.get("notes"), dict) else "Unknown",
+                    customer_email=payment_data.get("email", ""),
+                    customer_phone=payment_data.get("contact", ""),
+                    payment_captured_at=datetime.utcnow(),
+                    razorpay_signature=signature
+                )
+                db.add(new_payment)
+                db.commit()
+                
+                return {"status": "success", "message": "Payment created and captured"}
+        
+        elif event_type == "payment.failed":
+            # Handle failed payment
+            payment_data = webhook_data.get("payload", {}).get("payment", {})
+            payment_id = payment_data.get("id")
+            
+            payment = db.query(models.Payment).filter(
+                models.Payment.razorpay_payment_id == payment_id
+            ).first()
+            
+            if payment:
+                payment.status = "failed"
+                db.commit()
+                
+                try:
+                    log_activity(
+                        db, 1, "payment_failed", "payment", payment.id,
+                        f"Payment failed: {payment.customer_name} ({payment.customer_email})"
+                    )
+                except Exception:
+                    pass  # Don't fail webhook if logging fails
+        
+        return {"status": "success", "message": "Webhook processed"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
+
+
+# ============= Payment Management =============
+
+@app.post("/api/payments", response_model=schemas.Payment)
+async def create_payment(
+    payment: schemas.PaymentCreate,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new payment record
+    """
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == payment.event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Check if payment already exists
+    existing_payment = db.query(models.Payment).filter(
+        models.Payment.razorpay_payment_id == payment.razorpay_payment_id
+    ).first()
+    
+    if existing_payment:
+        raise HTTPException(status_code=400, detail="Payment already exists")
+    
+    # Create payment record
+    db_payment = models.Payment(**payment.dict())
+    db.add(db_payment)
+    db.commit()
+    db.refresh(db_payment)
+    
+    # Log activity
+    log_activity(
+        db, current_user.id, "create_payment", "payment", db_payment.id,
+        f"Created payment: {db_payment.customer_name} ({db_payment.customer_email}) - ₹{db_payment.amount/100}"
+    )
+    
+    return db_payment
+
+
+@app.get("/api/events/{event_id}/payments", response_model=List[schemas.PaymentWithDetails])
+async def get_event_payments(
+    event_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all payments for an event
+    """
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    payments = db.query(models.Payment).filter(models.Payment.event_id == event_id).all()
+    return payments
+
+
+@app.get("/api/payments/{payment_id}", response_model=schemas.PaymentWithDetails)
+async def get_payment(
+    payment_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Get payment details
+    """
+    payment = db.query(models.Payment).filter(models.Payment.id == payment_id).first()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == payment.event_id).first()
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return payment
+
+
+@app.put("/api/payments/{payment_id}", response_model=schemas.Payment)
+async def update_payment(
+    payment_id: int,
+    payment_update: schemas.PaymentUpdate,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Update payment status
+    """
+    payment = db.query(models.Payment).filter(models.Payment.id == payment_id).first()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == payment.event_id).first()
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Update payment
+    update_data = payment_update.dict(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(payment, key, value)
+    
+    db.commit()
+    db.refresh(payment)
+    
+    # Log activity
+    log_activity(
+        db, current_user.id, "update_payment", "payment", payment.id,
+        f"Updated payment: {payment.customer_name} - Status: {payment.status}"
+    )
+    
+    return payment
 
 
 # ============= Health Check =============

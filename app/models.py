@@ -69,6 +69,7 @@ class Event(Base):
     club = relationship("Club", back_populates="events")
     creator = relationship("User", back_populates="events_created")
     attendees = relationship("Attendee", back_populates="event", cascade="all, delete-orphan")
+    payments = relationship("Payment", back_populates="event", cascade="all, delete-orphan")
 
 
 class Attendee(Base):
@@ -112,6 +113,45 @@ class Attendee(Base):
     # Relationships
     event = relationship("Event", back_populates="attendees")
     checker = relationship("User", back_populates="attendees_checked")
+    payments = relationship("Payment", back_populates="attendee", cascade="all, delete-orphan")
+
+
+class Payment(Base):
+    """
+    Payments table - Track Razorpay payment transactions
+    """
+    __tablename__ = "payments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id"), nullable=False)
+    attendee_id = Column(Integer, ForeignKey("attendees.id"), nullable=True)  # Can be null for bulk payments
+    
+    # Razorpay details
+    razorpay_payment_id = Column(String(255), unique=True, index=True, nullable=False)
+    razorpay_order_id = Column(String(255), nullable=True)
+    razorpay_signature = Column(String(500), nullable=True)
+    
+    # Payment details
+    amount = Column(Integer, nullable=False)  # Amount in paise
+    currency = Column(String(10), default="INR")
+    status = Column(String(50), nullable=False, index=True)  # 'pending', 'captured', 'failed', 'refunded'
+    
+    # Customer details (from Razorpay Pages form)
+    customer_name = Column(String(255), nullable=False)
+    customer_email = Column(String(255), nullable=False, index=True)
+    customer_phone = Column(String(20), nullable=True)
+    
+    # Additional form data from Razorpay Pages
+    form_data = Column(Text, nullable=True)  # JSON string of additional form fields
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    payment_captured_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Relationships
+    event = relationship("Event", back_populates="payments")
+    attendee = relationship("Attendee", back_populates="payments")
 
 
 class ActivityLog(Base):

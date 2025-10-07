@@ -216,3 +216,56 @@ class CheckInResponse(BaseModel):
     success: bool
     message: str
     attendee: Optional[AttendeeWithChecker] = None
+
+
+# ============= Payment Schemas =============
+class PaymentBase(BaseModel):
+    event_id: int
+    attendee_id: Optional[int] = None
+    amount: int  # Amount in paise
+    currency: str = "INR"
+    customer_name: str
+    customer_email: EmailStr
+    customer_phone: Optional[str] = None
+    form_data: Optional[str] = None  # JSON string of additional form fields
+
+class PaymentCreate(PaymentBase):
+    razorpay_payment_id: str
+    razorpay_order_id: Optional[str] = None
+    razorpay_signature: Optional[str] = None
+
+class PaymentUpdate(BaseModel):
+    status: Optional[str] = None
+    razorpay_signature: Optional[str] = None
+    payment_captured_at: Optional[datetime] = None
+
+class Payment(PaymentBase):
+    id: int
+    razorpay_payment_id: str
+    razorpay_order_id: Optional[str] = None
+    razorpay_signature: Optional[str] = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    payment_captured_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class PaymentWithDetails(Payment):
+    event: "Event"
+    attendee: Optional["Attendee"] = None
+
+# ============= Razorpay Webhook Schemas =============
+class RazorpayWebhookEvent(BaseModel):
+    entity: str
+    account_id: str
+    event: str
+    contains: List[str]
+    payload: dict
+    created_at: int
+
+class RazorpayPaymentPayload(BaseModel):
+    payment: dict
+    order: Optional[dict] = None
+    invoice: Optional[dict] = None
