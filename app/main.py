@@ -60,7 +60,7 @@ app.add_middleware(
         "http://127.0.0.1:8080",
         "http://localhost:3000",  # Vite dev server
         "https://qrflow-frontend-gcv0w3nm2-infix8s-projects.vercel.app",  # Vercel domain
-        "https://qrflow-frontend.vercel.app/",           # Custom domain
+        "https://qrflow-frontend.vercel.app",           # Custom domain
         "https://*.vercel.app",                   # All Vercel domains
     ],
     allow_credentials=True,
