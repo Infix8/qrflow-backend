@@ -13,8 +13,9 @@ import pandas as pd
 import json
 import io
 import razorpay
-import hmac
-import hashlib
+import asyncio
+import threading
+import time
 
 from . import models, schemas, security, utils
 from .database import engine, get_db
@@ -98,23 +99,250 @@ def log_activity(
     db.commit()
 
 
-def verify_razorpay_webhook_signature(payload: str, signature: str) -> bool:
+# ============= Background Scheduler =============
+
+def sync_payments_and_create_attendees():
     """
-    Verify Razorpay webhook signature
+    Background task to sync payments from Razorpay and create attendee QR codes
+    This function runs every 30 minutes
     """
     try:
-        if not settings.RAZORPAY_WEBHOOK_SECRET:
-            return False
-            
-        expected_signature = hmac.new(
-            settings.RAZORPAY_WEBHOOK_SECRET.encode('utf-8'),
-            payload.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
+        from datetime import datetime, timedelta
+        import pytz
         
-        return hmac.compare_digest(signature, expected_signature)
-    except Exception:
-        return False
+        # Use IST timezone
+        ist = pytz.timezone('Asia/Kolkata')
+        current_time = datetime.now(ist)
+        print(f"🔄 Starting payment sync at {current_time.strftime('%Y-%m-%d %H:%M:%S IST')}")
+        
+        # Get database session
+        from .database import SessionLocal
+        db = SessionLocal()
+        
+        try:
+            # Get Razorpay client
+            razorpay_client = get_razorpay_client()
+            
+            # Fetch recent payments from Razorpay (last 24 hours)
+            yesterday = datetime.now(ist) - timedelta(days=1)
+            params = {
+                "count": 100,
+                "from": int(yesterday.timestamp())
+            }
+            
+            print(f"🔍 Fetching payments from Razorpay with params: {params}")
+            payments_response = razorpay_client.payment.all(params)
+            payments = payments_response.get("items", [])
+            print(f"📊 Found {len(payments)} payments from Razorpay")
+            
+            # Filter for QR flow payments
+            qr_flow_payments = []
+            for payment in payments:
+                # Check if this is a QR flow payment
+                is_qr_flow = (
+                    payment.get("description") == "QRv2 Payment" or
+                    (payment.get("notes") and 
+                     isinstance(payment.get("notes"), dict) and
+                     any(key in payment.get("notes", {}) for key in ["college_name", "department", "roll_number", "name", "phone"]))
+                )
+                
+                if is_qr_flow:
+                    qr_flow_payments.append(payment)
+                    print(f"✅ QR Flow payment found: {payment.get('id')} - {payment.get('description')}")
+            
+            print(f"🎯 Filtered {len(qr_flow_payments)} QR flow payments")
+            
+            # Process each QR flow payment
+            synced_count = 0
+            created_count = 0
+            updated_count = 0
+            attendees_created = 0
+            
+            for payment in qr_flow_payments:
+                try:
+                    payment_id = payment.get("id")
+                    amount = payment.get("amount", 0)
+                    currency = payment.get("currency", "INR")
+                    status = payment.get("status", "pending")
+                    email = payment.get("email", "")
+                    contact = payment.get("contact", "")
+                    notes = payment.get("notes", {})
+                    
+                    # Extract student information from notes
+                    student_name = notes.get("name", "Unknown")
+                    college_name = notes.get("college_name", "")
+                    department = notes.get("department", "")
+                    roll_number = notes.get("roll_number", "")
+                    phone = notes.get("phone", contact)
+                    emergency_contact = notes.get("emergency_contact_number", "")
+                    
+                    # Check if payment already exists
+                    existing_payment = db.query(models.Payment).filter(
+                        models.Payment.razorpay_payment_id == payment_id
+                    ).first()
+                    
+                    if existing_payment:
+                        # Update existing payment
+                        existing_payment.amount = amount
+                        existing_payment.currency = currency
+                        existing_payment.status = status
+                        existing_payment.customer_name = student_name
+                        existing_payment.customer_email = email
+                        existing_payment.customer_phone = phone
+                        existing_payment.payment_captured_at = datetime.now(ist) if status == "captured" else None
+                        db.commit()
+                        updated_count += 1
+                        print(f"🔄 Updated payment: {payment_id}")
+                    else:
+                        # Create new payment record
+                        # Try to determine event_id from notes or use default
+                        event_id = notes.get("event_id", 1)  # Default to event 1
+                        
+                        new_payment = models.Payment(
+                            event_id=event_id,
+                            razorpay_payment_id=payment_id,
+                            amount=amount,
+                            currency=currency,
+                            status=status,
+                            customer_name=student_name,
+                            customer_email=email,
+                            customer_phone=phone,
+                            payment_captured_at=datetime.now(ist) if status == "captured" else None,
+                            razorpay_signature="",  # Not available from API
+                            form_data=json.dumps({
+                                "college_name": college_name,
+                                "department": department,
+                                "roll_number": roll_number,
+                                "emergency_contact": emergency_contact,
+                                "original_notes": notes
+                            })
+                        )
+                        
+                        db.add(new_payment)
+                        db.commit()
+                        db.refresh(new_payment)
+                        created_count += 1
+                        print(f"➕ Created payment: {payment_id}")
+                        
+                        # Create attendee if payment is captured and we have student details
+                        if status == "captured" and student_name != "Unknown" and roll_number:
+                            try:
+                                # Check if attendee already exists
+                                existing_attendee = db.query(models.Attendee).filter(
+                                    models.Attendee.event_id == event_id,
+                                    (models.Attendee.email == email) | (models.Attendee.roll_number == roll_number)
+                                ).first()
+                                
+                                if not existing_attendee:
+                                    # Create new attendee
+                                    attendee = models.Attendee(
+                                        event_id=event_id,
+                                        name=student_name,
+                                        email=email,
+                                        roll_number=roll_number,
+                                        branch=department.upper() if department else "UNKNOWN",
+                                        year=1,  # Default year
+                                        section="A",  # Default section
+                                        phone=phone,
+                                        gender="Not Specified"
+                                    )
+                                    
+                                    db.add(attendee)
+                                    db.commit()
+                                    db.refresh(attendee)
+                                    attendees_created += 1
+                                    
+                                    # Generate QR token and send email
+                                    try:
+                                        # Get event details
+                                        event = db.query(models.Event).filter(models.Event.id == event_id).first()
+                                        if event:
+                                            # Generate QR token
+                                            qr_token = utils.generate_qr_token(
+                                                event_id=event.id,
+                                                attendee_id=attendee.id,
+                                                email=attendee.email,
+                                                roll_number=attendee.roll_number,
+                                                event_date=event.date
+                                            )
+                                            attendee.qr_token = qr_token
+                                            attendee.qr_generated = True
+                                            attendee.qr_generated_at = datetime.now(ist)
+                                            
+                                            # Generate QR code image
+                                            qr_code_bytes = utils.generate_qr_code(
+                                                token=attendee.qr_token,
+                                                attendee_name=attendee.name,
+                                                event_name=event.name
+                                            )
+                                            
+                                            # Send email
+                                            email_success, error_msg = utils.send_qr_email(
+                                                to_email=attendee.email,
+                                                attendee_name=attendee.name,
+                                                event_name=event.name,
+                                                event_date=event.date,
+                                                event_venue=event.venue or "TBA",
+                                                qr_code_bytes=qr_code_bytes
+                                            )
+                                            
+                                            if email_success:
+                                                attendee.email_sent = True
+                                                attendee.email_sent_at = datetime.now(ist)
+                                                attendee.email_error = None
+                                                print(f"📧 QR code sent to: {attendee.email}")
+                                            else:
+                                                attendee.email_error = error_msg
+                                                print(f"❌ Email failed for {attendee.email}: {error_msg}")
+                                            
+                                            db.commit()
+                                    
+                                    except Exception as e:
+                                        print(f"❌ Error creating QR for {attendee.email}: {str(e)}")
+                                        attendee.email_error = str(e)
+                                        db.commit()
+                                
+                            except Exception as e:
+                                print(f"❌ Error creating attendee for {student_name}: {str(e)}")
+                    
+                    synced_count += 1
+                    
+                except Exception as e:
+                    print(f"❌ Error processing payment {payment.get('id', 'unknown')}: {str(e)}")
+            
+            print(f"✅ Sync completed: {synced_count} payments processed, {created_count} created, {updated_count} updated, {attendees_created} attendees created")
+            
+        except Exception as e:
+            print(f"❌ Payment sync error: {str(e)}")
+        finally:
+            db.close()
+            
+    except Exception as e:
+        print(f"❌ Background sync error: {str(e)}")
+
+
+def start_background_scheduler():
+    """
+    Start the background scheduler that runs every 30 minutes
+    """
+    def scheduler_loop():
+        while True:
+            try:
+                sync_payments_and_create_attendees()
+            except Exception as e:
+                print(f"❌ Scheduler error: {str(e)}")
+            
+            # Wait 30 minutes (1800 seconds)
+            time.sleep(1800)
+    
+    # Start scheduler in a separate thread
+    scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
+    scheduler_thread.start()
+    print("🔄 Background payment sync scheduler started (every 30 minutes)")
+
+
+# Start the background scheduler when the app starts
+start_background_scheduler()
 
 
 
@@ -138,7 +366,9 @@ async def login(
         )
     
     # Update last login
-    user.last_login = datetime.utcnow()
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    user.last_login = datetime.now(ist)
     db.commit()
     
     # Create access token
@@ -213,13 +443,17 @@ async def create_club(
 
 @app.get("/api/admin/clubs", response_model=List[schemas.Club])
 async def list_clubs(
+    include_disabled: bool = False,
     current_user: models.User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """
-    Admin: List all clubs
+    Admin: List clubs (active only by default, include disabled if requested)
     """
-    clubs = db.query(models.Club).order_by(models.Club.name).all()
+    query = db.query(models.Club)
+    if not include_disabled:
+        query = query.filter(models.Club.active == True)
+    clubs = query.order_by(models.Club.name).all()
     return clubs
 
 
@@ -282,6 +516,28 @@ async def delete_club(
     return {"message": f"Club {db_club.name} has been disabled"}
 
 
+@app.post("/api/admin/clubs/{club_id}/enable")
+async def enable_club(
+    club_id: int,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: Re-enable a disabled club
+    """
+    db_club = db.query(models.Club).filter(models.Club.id == club_id).first()
+    if not db_club:
+        raise HTTPException(status_code=404, detail="Club not found")
+    
+    db_club.active = True
+    db.commit()
+    
+    # Log activity
+    log_activity(db, current_user.id, "enable_club", "club", db_club.id, f"Re-enabled club: {db_club.name}")
+    
+    return {"message": f"Club {db_club.name} has been re-enabled"}
+
+
 # ============= Admin - User Management =============
 
 @app.post("/api/admin/users", response_model=schemas.User)
@@ -332,13 +588,17 @@ async def create_user(
 
 @app.get("/api/admin/users", response_model=List[schemas.UserWithClub])
 async def list_users(
+    include_disabled: bool = False,
     current_user: models.User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """
-    Admin: List all users
+    Admin: List users (active only by default, include disabled if requested)
     """
-    users = db.query(models.User).order_by(models.User.username).all()
+    query = db.query(models.User)
+    if not include_disabled:
+        query = query.filter(models.User.disabled == False)
+    users = query.order_by(models.User.username).all()
     return users
 
 
@@ -420,6 +680,28 @@ async def delete_user(
     log_activity(db, current_user.id, "delete_user", "user", db_user.id, f"Disabled user: {db_user.username}")
     
     return {"message": f"User {db_user.username} has been disabled"}
+
+
+@app.post("/api/admin/users/{user_id}/enable")
+async def enable_user(
+    user_id: int,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin: Re-enable a disabled user
+    """
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    db_user.disabled = False
+    db.commit()
+    
+    # Log activity
+    log_activity(db, current_user.id, "enable_user", "user", db_user.id, f"Re-enabled user: {db_user.username}")
+    
+    return {"message": f"User {db_user.username} has been re-enabled"}
 
 
 # ============= Admin - Activity Logs =============
@@ -527,11 +809,16 @@ async def create_event(
     """
     Create a new event (club members only)
     """
-    if not current_user.club_id:
+    # For admins, allow creating events without club assignment
+    # For organizers, require club assignment
+    if current_user.role == "organizer" and not current_user.club_id:
         raise HTTPException(status_code=400, detail="User must be assigned to a club to create events")
     
+    # Use club_id from user, or default to 1 for admins
+    club_id = current_user.club_id if current_user.club_id else 1
+    
     db_event = models.Event(
-        club_id=current_user.club_id,
+        club_id=club_id,
         created_by=current_user.id,
         **event.dict()
     )
@@ -781,10 +1068,10 @@ async def upload_attendees_csv(
         
         for index, row in df.iterrows():
             try:
-                # Check if attendee already exists (by email or roll_number)
+                # Check if attendee already exists (by roll_number only)
                 existing = db.query(models.Attendee).filter(
                     models.Attendee.event_id == event_id,
-                    (models.Attendee.email == row['email']) | (models.Attendee.roll_number == row['roll_number'])
+                    models.Attendee.roll_number == row['roll_number']
                 ).first()
                 
                 if existing:
@@ -837,6 +1124,79 @@ async def upload_attendees_csv(
     
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error processing CSV: {str(e)}")
+
+
+@app.post("/api/events/{event_id}/attendees", response_model=schemas.Attendee)
+async def create_attendee(
+    event_id: int,
+    attendee_data: schemas.AttendeeBase,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new attendee for an event
+    """
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Check if attendee already exists (by roll number only)
+    existing = db.query(models.Attendee).filter(
+        models.Attendee.event_id == event_id,
+        models.Attendee.roll_number == attendee_data.roll_number
+    ).first()
+    
+    if existing:
+        raise HTTPException(status_code=400, detail="Attendee already exists with this roll number")
+    
+    # Create attendee
+    attendee = models.Attendee(
+        event_id=event_id,
+        name=attendee_data.name,
+        email=attendee_data.email,
+        roll_number=attendee_data.roll_number,
+        branch=attendee_data.branch,
+        year=attendee_data.year,
+        section=attendee_data.section,
+        phone=attendee_data.phone,
+        gender=attendee_data.gender
+    )
+    
+    db.add(attendee)
+    db.commit()
+    db.refresh(attendee)
+    
+    # Log activity
+    log_activity(
+        db, current_user.id, "create_attendee", "attendee", attendee.id,
+        f"Created attendee: {attendee.name} ({attendee.roll_number}) for event: {event.name}"
+    )
+    
+    return attendee
+
+
+@app.get("/api/attendees/{attendee_id}", response_model=schemas.Attendee)
+async def get_attendee(
+    attendee_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Get attendee details by ID
+    """
+    attendee = db.query(models.Attendee).filter(models.Attendee.id == attendee_id).first()
+    if not attendee:
+        raise HTTPException(status_code=404, detail="Attendee not found")
+    
+    # Check access
+    if current_user.role != "admin" and attendee.event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return attendee
 
 
 @app.put("/api/attendees/{attendee_id}", response_model=schemas.Attendee)
@@ -967,7 +1327,9 @@ async def generate_and_send_qr(
                 )
                 attendee.qr_token = qr_token
                 attendee.qr_generated = True
-                attendee.qr_generated_at = datetime.utcnow()
+                import pytz
+                ist = pytz.timezone('Asia/Kolkata')
+                attendee.qr_generated_at = datetime.now(ist)
             
             # Send email if not already sent
             if not attendee.email_sent:
@@ -990,7 +1352,7 @@ async def generate_and_send_qr(
                 
                 if email_success:
                     attendee.email_sent = True
-                    attendee.email_sent_at = datetime.utcnow()
+                    attendee.email_sent_at = datetime.now(ist)
                     attendee.email_error = None
                     success += 1
                 else:
@@ -1054,6 +1416,9 @@ async def resend_qr_to_attendee(
         raise HTTPException(status_code=403, detail="Access denied")
     
     try:
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        
         # Generate QR token if not exists
         if not attendee.qr_token:
             qr_token = utils.generate_qr_token(
@@ -1065,7 +1430,7 @@ async def resend_qr_to_attendee(
             )
             attendee.qr_token = qr_token
             attendee.qr_generated = True
-            attendee.qr_generated_at = datetime.utcnow()
+            attendee.qr_generated_at = datetime.now(ist)
         
         # Generate QR code image
         qr_code_bytes = utils.generate_qr_code(
@@ -1086,7 +1451,7 @@ async def resend_qr_to_attendee(
         
         if email_success:
             attendee.email_sent = True
-            attendee.email_sent_at = datetime.utcnow()
+            attendee.email_sent_at = datetime.now(ist)
             attendee.email_error = None
             db.commit()
             
@@ -1159,8 +1524,10 @@ async def scan_qr_checkin(
             }
         
         # Check-in
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
         attendee.checked_in = True
-        attendee.checkin_time = datetime.utcnow()
+        attendee.checkin_time = datetime.now(ist)
         attendee.checked_by = current_user.id
         db.commit()
         db.refresh(attendee)
@@ -1218,8 +1585,10 @@ async def manual_checkin(
         )
     
     # Check-in
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
     attendee.checked_in = True
-    attendee.checkin_time = datetime.utcnow()
+    attendee.checkin_time = datetime.now(ist)
     attendee.checked_by = current_user.id
     db.commit()
     
@@ -1415,116 +1784,39 @@ async def export_attendees_csv(
     )
 
 
-# ============= Razorpay Webhook =============
+# ============= Payment Sync Endpoint =============
 
-@app.post("/api/webhooks/razorpay")
-async def razorpay_webhook(
-    request: Request,
+@app.post("/api/payments/sync")
+async def manual_sync_payments(
+    current_user: models.User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """
-    Razorpay webhook endpoint to receive payment notifications
+    Manual payment sync endpoint - triggers immediate sync from Razorpay
     """
     try:
-        # Get raw body and signature
-        body = await request.body()
-        signature = request.headers.get("X-Razorpay-Signature", "")
+        print(f"🔄 Manual payment sync triggered by {current_user.username}")
         
-        # Verify webhook signature
-        if not verify_razorpay_webhook_signature(body.decode('utf-8'), signature):
-            raise HTTPException(status_code=400, detail="Invalid webhook signature")
+        # Run the sync function
+        sync_payments_and_create_attendees()
         
-        # Parse webhook data
-        try:
-            webhook_data = json.loads(body.decode('utf-8'))
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON payload")
-            
-        event_type = webhook_data.get("event")
+        # Log activity
+        log_activity(
+            db, current_user.id, "manual_sync", "payment", None,
+            f"Manual payment sync triggered by {current_user.username}"
+        )
         
-        if event_type == "payment.captured":
-            # Handle successful payment
-            payment_data = webhook_data.get("payload", {}).get("payment", {})
-            payment_id = payment_data.get("id")
-            
-            # Find existing payment record
-            payment = db.query(models.Payment).filter(
-                models.Payment.razorpay_payment_id == payment_id
-            ).first()
-            
-            if payment:
-                # Update payment status
-                payment.status = "captured"
-                payment.payment_captured_at = datetime.utcnow()
-                payment.razorpay_signature = signature
-                db.commit()
-                
-                # Log activity (use system user ID 1 or create a webhook user)
-                try:
-                    log_activity(
-                        db, 1, "payment_captured", "payment", payment.id,
-                        f"Payment captured: {payment.customer_name} ({payment.customer_email}) - ₹{payment.amount/100}"
-                    )
-                except Exception:
-                    pass  # Don't fail webhook if logging fails
-                
-                return {"status": "success", "message": "Payment captured successfully"}
-            else:
-                # Create new payment record from webhook data
-                # Try to extract event_id from payment notes or form data
-                event_id = 1  # Default fallback
-                notes = payment_data.get("notes", {})
-                if isinstance(notes, dict):
-                    event_id = notes.get("event_id", 1)
-                elif isinstance(notes, str):
-                    try:
-                        notes_dict = json.loads(notes)
-                        event_id = notes_dict.get("event_id", 1)
-                    except:
-                        pass
-                
-                new_payment = models.Payment(
-                    event_id=event_id,
-                    razorpay_payment_id=payment_id,
-                    amount=payment_data.get("amount", 0),
-                    currency=payment_data.get("currency", "INR"),
-                    status="captured",
-                    customer_name=payment_data.get("notes", {}).get("name", "Unknown") if isinstance(payment_data.get("notes"), dict) else "Unknown",
-                    customer_email=payment_data.get("email", ""),
-                    customer_phone=payment_data.get("contact", ""),
-                    payment_captured_at=datetime.utcnow(),
-                    razorpay_signature=signature
-                )
-                db.add(new_payment)
-                db.commit()
-                
-                return {"status": "success", "message": "Payment created and captured"}
-        
-        elif event_type == "payment.failed":
-            # Handle failed payment
-            payment_data = webhook_data.get("payload", {}).get("payment", {})
-            payment_id = payment_data.get("id")
-            
-            payment = db.query(models.Payment).filter(
-                models.Payment.razorpay_payment_id == payment_id
-            ).first()
-            
-            if payment:
-                payment.status = "failed"
-                db.commit()
-                
-                try:
-                    log_activity(
-                        db, 1, "payment_failed", "payment", payment.id,
-                        f"Payment failed: {payment.customer_name} ({payment.customer_email})"
-                    )
-                except Exception:
-                    pass  # Don't fail webhook if logging fails
-        
-        return {"status": "success", "message": "Webhook processed"}
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        return {
+            "success": True,
+            "message": "Payment sync completed successfully",
+            "timestamp": datetime.now(ist).isoformat()
+        }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
+        print(f"❌ Manual sync error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Manual sync failed: {str(e)}")
 
 
 # ============= Payment Management =============
@@ -1645,6 +1937,46 @@ async def update_payment(
     )
     
     return payment
+
+
+# ============= Razorpay Status Check =============
+
+@app.get("/api/payments/razorpay-status")
+async def get_razorpay_payment_status(
+    payment_id: str,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Get payment status from Razorpay API for a specific payment
+    """
+    try:
+        # Get Razorpay client
+        razorpay_client = get_razorpay_client()
+        
+        # Fetch payment details from Razorpay
+        payment = razorpay_client.payment.fetch(payment_id)
+        
+        return {
+            "success": True,
+            "payment": {
+                "id": payment.get("id"),
+                "amount": payment.get("amount"),
+                "currency": payment.get("currency"),
+                "status": payment.get("status"),
+                "method": payment.get("method"),
+                "description": payment.get("description"),
+                "email": payment.get("email"),
+                "contact": payment.get("contact"),
+                "notes": payment.get("notes"),
+                "created_at": payment.get("created_at"),
+                "captured": payment.get("captured")
+            }
+        }
+        
+    except Exception as e:
+        print(f"❌ Razorpay payment fetch error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch payment: {str(e)}")
 
 
 # ============= Health Check =============

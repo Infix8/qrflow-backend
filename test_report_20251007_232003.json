@@ -1,0 +1,156 @@
+[
+  {
+    "test": "Root Endpoint",
+    "success": true,
+    "message": "Status: running",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:02.811926"
+  },
+  {
+    "test": "Health Check",
+    "success": true,
+    "message": "Database: connected",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:02.813353"
+  },
+  {
+    "test": "Login",
+    "success": true,
+    "message": "Token received: eyJhbGciOiJIUzI1NiIs...",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.065127"
+  },
+  {
+    "test": "Get Current User",
+    "success": true,
+    "message": "User: admin (admin)",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.070653"
+  },
+  {
+    "test": "List Clubs",
+    "success": true,
+    "message": "Found 1 clubs",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.073847"
+  },
+  {
+    "test": "Create Club",
+    "success": true,
+    "message": "Created club ID: 2",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.096169"
+  },
+  {
+    "test": "Create Event",
+    "success": false,
+    "message": "Status code: 400",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.098669"
+  },
+  {
+    "test": "List Events",
+    "success": true,
+    "message": "Found 0 events",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.101293"
+  },
+  {
+    "test": "Attendee Management",
+    "success": false,
+    "message": "Missing token or event ID",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.101322"
+  },
+  {
+    "test": "Manual Payment Sync",
+    "success": true,
+    "message": "Sync completed: Payment sync completed successfully",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.112095"
+  },
+  {
+    "test": "QR Code Generation",
+    "success": false,
+    "message": "Missing token or event ID",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.112158"
+  },
+  {
+    "test": "QR Scan (Invalid Token)",
+    "success": true,
+    "message": "Correctly rejected: Invalid QR code: Invalid QR token: Not enough segments",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.114388"
+  },
+  {
+    "test": "Dashboard/Export",
+    "success": false,
+    "message": "Missing token or event ID",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.114434"
+  },
+  {
+    "test": "Unauthorized Access",
+    "success": true,
+    "message": "Correctly requires authentication",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.115308"
+  },
+  {
+    "test": "Invalid Token",
+    "success": true,
+    "message": "Correctly rejected invalid token",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.116385"
+  },
+  {
+    "test": "Invalid Event ID",
+    "success": true,
+    "message": "Correctly returned 404",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.119179"
+  },
+  {
+    "test": "Invalid Attendee ID",
+    "success": false,
+    "message": "Should return 404, got 405",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.120054"
+  },
+  {
+    "test": "Performance - Root endpoint",
+    "success": true,
+    "message": "Response time: 0.80ms",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.120886"
+  },
+  {
+    "test": "Performance - Health check",
+    "success": true,
+    "message": "Response time: 1.21ms",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.122109"
+  },
+  {
+    "test": "Performance - Current user",
+    "success": true,
+    "message": "Response time: 2.14ms",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.124264"
+  },
+  {
+    "test": "Performance - List clubs",
+    "success": true,
+    "message": "Response time: 2.61ms",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.126887"
+  },
+  {
+    "test": "Performance - List events",
+    "success": true,
+    "message": "Response time: 2.11ms",
+    "details": null,
+    "timestamp": "2025-10-07T23:20:03.129016"
+  }
+]

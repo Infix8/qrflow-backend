@@ -199,19 +199,18 @@ curl -X GET "https://yourdomain.com/api/events/1/payments" \
   -H "Authorization: Bearer your_jwt_token"
 ```
 
-### 2. Test Webhook
+### 2. Test Payment Sync
 
-Use Razorpay's webhook testing tool or ngrok for local testing:
+The system automatically syncs payments every 30 minutes. You can also trigger manual sync:
 
 ```bash
-# Install ngrok
-npm install -g ngrok
+# Manual payment sync (Admin only)
+curl -X POST "http://localhost:8000/api/payments/sync" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
 
-# Expose local server
-ngrok http 8000
-
-# Use ngrok URL in Razorpay webhook settings
-# https://abc123.ngrok.io/api/webhooks/razorpay
+# Check payment status
+curl -X GET "http://localhost:8000/api/events/1/payments" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```
 
 ## 🚨 Troubleshooting

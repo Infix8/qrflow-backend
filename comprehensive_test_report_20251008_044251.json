@@ -1,0 +1,219 @@
+[
+  {
+    "test": "Root Endpoint",
+    "success": true,
+    "message": "API Status: running",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.459695"
+  },
+  {
+    "test": "Health Check",
+    "success": true,
+    "message": "Database: connected",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.460930"
+  },
+  {
+    "test": "Login",
+    "success": true,
+    "message": "Token received: eyJhbGciOiJIUzI1NiIs...",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.734922"
+  },
+  {
+    "test": "Get Current User",
+    "success": true,
+    "message": "User: admin (admin)",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.740391"
+  },
+  {
+    "test": "Logout",
+    "success": true,
+    "message": "Successfully logged out",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.751710"
+  },
+  {
+    "test": "Re-login After Logout",
+    "success": true,
+    "message": "Successfully re-authenticated",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.982939"
+  },
+  {
+    "test": "List Clubs",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.984418"
+  },
+  {
+    "test": "Create Club",
+    "success": false,
+    "message": "Status code: 401, Response: {\"detail\":\"Could not validate credentials\"}",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.985791"
+  },
+  {
+    "test": "List Users",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.987109"
+  },
+  {
+    "test": "Create User",
+    "success": false,
+    "message": "Status code: 401, Response: {\"detail\":\"Could not validate credentials\"}",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.988403"
+  },
+  {
+    "test": "Get All Logs",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.989483"
+  },
+  {
+    "test": "Get Club Info",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.990535"
+  },
+  {
+    "test": "Get Club Members",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.991789"
+  },
+  {
+    "test": "Get Club Events",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.992814"
+  },
+  {
+    "test": "Create Event",
+    "success": false,
+    "message": "Status code: 401, Response: {\"detail\":\"Could not validate credentials\"}",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.993864"
+  },
+  {
+    "test": "List Events",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.994861"
+  },
+  {
+    "test": "Attendee Management",
+    "success": false,
+    "message": "Missing token or event ID",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.994890"
+  },
+  {
+    "test": "QR Code Generation",
+    "success": false,
+    "message": "Missing token or event ID",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.994893"
+  },
+  {
+    "test": "QR Scan (Invalid Token)",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.995905"
+  },
+  {
+    "test": "Dashboard/Export",
+    "success": false,
+    "message": "Missing token or event ID",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.995941"
+  },
+  {
+    "test": "Manual Payment Sync",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.996921"
+  },
+  {
+    "test": "Unauthorized Access",
+    "success": true,
+    "message": "Correctly requires authentication",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.997713"
+  },
+  {
+    "test": "Invalid Token",
+    "success": true,
+    "message": "Correctly rejected invalid token",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.998698"
+  },
+  {
+    "test": "Invalid Event ID",
+    "success": false,
+    "message": "Should return 404, got 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:50.999679"
+  },
+  {
+    "test": "Invalid Attendee ID",
+    "success": false,
+    "message": "Should return 404, got 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:51.000830"
+  },
+  {
+    "test": "Invalid Payment ID",
+    "success": false,
+    "message": "Should return 404, got 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:51.001894"
+  },
+  {
+    "test": "Performance - Root endpoint",
+    "success": true,
+    "message": "Response time: 0.97ms",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:51.002900"
+  },
+  {
+    "test": "Performance - Health check",
+    "success": true,
+    "message": "Response time: 1.38ms",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:51.004293"
+  },
+  {
+    "test": "Performance - Current user",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:51.005481"
+  },
+  {
+    "test": "Performance - List clubs",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:51.006505"
+  },
+  {
+    "test": "Performance - List events",
+    "success": false,
+    "message": "Status code: 401",
+    "details": null,
+    "timestamp": "2025-10-08T04:42:51.007489"
+  }
+]

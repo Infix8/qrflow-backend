@@ -233,6 +233,7 @@ class PaymentCreate(PaymentBase):
     razorpay_payment_id: str
     razorpay_order_id: Optional[str] = None
     razorpay_signature: Optional[str] = None
+    status: str = "pending"  # Default status
 
 class PaymentUpdate(BaseModel):
     status: Optional[str] = None

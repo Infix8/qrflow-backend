@@ -1,0 +1,184 @@
+[
+  {
+    "test": "Root Endpoint",
+    "success": true,
+    "message": "Status: running",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.491828"
+  },
+  {
+    "test": "Health Check",
+    "success": true,
+    "message": "Database: connected",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.493385"
+  },
+  {
+    "test": "Login",
+    "success": true,
+    "message": "Token received: eyJhbGciOiJIUzI1NiIs...",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.737125"
+  },
+  {
+    "test": "Get Current User",
+    "success": true,
+    "message": "User: admin (admin)",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.741928"
+  },
+  {
+    "test": "List Clubs",
+    "success": true,
+    "message": "Found 2 clubs",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.744995"
+  },
+  {
+    "test": "Create Club",
+    "success": true,
+    "message": "Created club ID: 3",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.766616"
+  },
+  {
+    "test": "Create Event",
+    "success": true,
+    "message": "Created event ID: 1",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.786603"
+  },
+  {
+    "test": "List Events",
+    "success": true,
+    "message": "Found 1 events",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.795312"
+  },
+  {
+    "test": "Get Event",
+    "success": true,
+    "message": "Event: Production Test Event 1759859478",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.799189"
+  },
+  {
+    "test": "Download Template",
+    "success": true,
+    "message": "Template downloaded successfully",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.803602"
+  },
+  {
+    "test": "List Attendees",
+    "success": true,
+    "message": "Found 0 attendees",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.806283"
+  },
+  {
+    "test": "Manual Payment Sync",
+    "success": true,
+    "message": "Sync completed: Payment sync completed successfully",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.815869"
+  },
+  {
+    "test": "Get Event Payments",
+    "success": true,
+    "message": "Found 2 payments",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.820164"
+  },
+  {
+    "test": "Generate QR Codes",
+    "success": true,
+    "message": "Processed: 0 attendees",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.823018"
+  },
+  {
+    "test": "QR Scan (Invalid Token)",
+    "success": true,
+    "message": "Correctly rejected: Invalid QR code: Invalid QR token: Not enough segments",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.824706"
+  },
+  {
+    "test": "Event Dashboard",
+    "success": true,
+    "message": "Stats: 0 attendees",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.826788"
+  },
+  {
+    "test": "CSV Export",
+    "success": false,
+    "message": "Status code: 500",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.832394"
+  },
+  {
+    "test": "Unauthorized Access",
+    "success": true,
+    "message": "Correctly requires authentication",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.833335"
+  },
+  {
+    "test": "Invalid Token",
+    "success": true,
+    "message": "Correctly rejected invalid token",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.834405"
+  },
+  {
+    "test": "Invalid Event ID",
+    "success": true,
+    "message": "Correctly returned 404",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.836253"
+  },
+  {
+    "test": "Invalid Attendee ID",
+    "success": true,
+    "message": "Correctly returned 404",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.838520"
+  },
+  {
+    "test": "Performance - Root endpoint",
+    "success": true,
+    "message": "Response time: 0.84ms",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.839391"
+  },
+  {
+    "test": "Performance - Health check",
+    "success": true,
+    "message": "Response time: 1.28ms",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.840682"
+  },
+  {
+    "test": "Performance - Current user",
+    "success": true,
+    "message": "Response time: 2.09ms",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.842784"
+  },
+  {
+    "test": "Performance - List clubs",
+    "success": true,
+    "message": "Response time: 1.75ms",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.844542"
+  },
+  {
+    "test": "Performance - List events",
+    "success": true,
+    "message": "Response time: 2.69ms",
+    "details": null,
+    "timestamp": "2025-10-07T23:21:18.847246"
+  }
+]
