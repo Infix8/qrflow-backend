@@ -1483,14 +1483,15 @@ async def resend_qr_to_attendee(
 
 # ============= Check-in Endpoints =============
 
-@app.post("/api/checkin/scan", response_model=schemas.CheckInResponse)
-async def scan_qr_checkin(
+@app.post("/api/checkin/validate")
+async def validate_qr_token(
     checkin_request: schemas.CheckInRequest,
     current_user: models.User = Depends(require_organizer),
     db: Session = Depends(get_db)
 ):
     """
-    Scan QR code and check-in attendee
+    Validate QR token and return attendee information without checking in
+    Useful for pre-validation or testing
     """
     try:
         # Verify QR token
@@ -1499,21 +1500,32 @@ async def scan_qr_checkin(
         event_id = payload.get("event_id")
         attendee_id = payload.get("attendee_id")
         
+        # Validate payload
+        if not event_id or not attendee_id:
+            return {
+                "success": False,
+                "message": "Invalid QR code - Missing event or attendee information",
+                "attendee": None,
+                "event": None
+            }
+        
         # Get event
         event = db.query(models.Event).filter(models.Event.id == event_id).first()
         if not event:
             return {
                 "success": False,
-                "message": "Event not found",
-                "attendee": None
+                "message": "Event not found - Please contact organizer",
+                "attendee": None,
+                "event": None
             }
         
         # Check access
         if current_user.role != "admin" and event.club_id != current_user.club_id:
             return {
                 "success": False,
-                "message": "Access denied - Not authorized for this event",
-                "attendee": None
+                "message": "Access denied - You are not authorized for this event",
+                "attendee": None,
+                "event": None
             }
         
         # Get attendee
@@ -1521,49 +1533,184 @@ async def scan_qr_checkin(
         if not attendee:
             return {
                 "success": False,
-                "message": "Attendee not found",
-                "attendee": None
+                "message": "Attendee not found - Please contact organizer",
+                "attendee": None,
+                "event": None
             }
         
-        # Check if already checked in
-        if attendee.checked_in:
-            return {
-                "success": False,
-                "message": f"Already checked in at {attendee.checkin_time.strftime('%I:%M %p')}",
-                "attendee": attendee
-            }
-        
-        # Check-in
-        import pytz
-        ist = pytz.timezone('Asia/Kolkata')
-        attendee.checked_in = True
-        attendee.checkin_time = datetime.now(ist)
-        attendee.checked_by = current_user.id
-        db.commit()
-        db.refresh(attendee)
-        
-        # Log activity
-        log_activity(
-            db, current_user.id, "checkin_scan", "attendee", attendee.id,
-            f"Checked in: {attendee.name} ({attendee.roll_number}) via QR scan"
-        )
-        
+        # Return attendee and event information
         return {
             "success": True,
-            "message": f"Successfully checked in: {attendee.name}",
-            "attendee": attendee
+            "message": f"✅ Valid QR code for {attendee.name} (Roll: {attendee.roll_number})",
+            "attendee": attendee,
+            "event": event,
+            "already_checked_in": attendee.checked_in,
+            "checkin_time": attendee.checkin_time.isoformat() if attendee.checkin_time else None
         }
     
     except ValueError as e:
-        return {
-            "success": False,
-            "message": f"Invalid QR code: {str(e)}",
-            "attendee": None
-        }
+        error_msg = str(e)
+        if "expired" in error_msg.lower():
+            return {
+                "success": False,
+                "message": "❌ QR code has expired - Please request a new QR code",
+                "attendee": None,
+                "event": None
+            }
+        elif "invalid" in error_msg.lower():
+            return {
+                "success": False,
+                "message": "❌ Invalid QR code - Please scan a valid QR code",
+                "attendee": None,
+                "event": None
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"❌ QR code error: {error_msg}",
+                "attendee": None,
+                "event": None
+            }
     except Exception as e:
         return {
             "success": False,
-            "message": f"Error: {str(e)}",
+            "message": f"❌ An unexpected error occurred: {str(e)}",
+            "attendee": None,
+            "event": None
+        }
+
+@app.post("/api/checkin/scan", response_model=schemas.CheckInResponse)
+async def scan_qr_checkin(
+    checkin_request: schemas.CheckInRequest,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Scan QR code and check-in attendee with race condition handling
+    """
+    try:
+        # Verify QR token
+        payload = utils.verify_qr_token(checkin_request.qr_token)
+        
+        event_id = payload.get("event_id")
+        attendee_id = payload.get("attendee_id")
+        
+        # Validate payload
+        if not event_id or not attendee_id:
+            return {
+                "success": False,
+                "message": "Invalid QR code - Missing event or attendee information",
+                "attendee": None
+            }
+        
+        # Get event with lock to prevent race conditions
+        event = db.query(models.Event).filter(models.Event.id == event_id).first()
+        if not event:
+            return {
+                "success": False,
+                "message": "Event not found - Please contact organizer",
+                "attendee": None
+            }
+        
+        # Check access
+        if current_user.role != "admin" and event.club_id != current_user.club_id:
+            return {
+                "success": False,
+                "message": "Access denied - You are not authorized for this event",
+                "attendee": None
+            }
+        
+        # Get attendee with row-level lock to prevent race conditions
+        from sqlalchemy import text
+        attendee = db.execute(
+            text("SELECT * FROM attendees WHERE id = :attendee_id FOR UPDATE"),
+            {"attendee_id": attendee_id}
+        ).fetchone()
+        
+        if not attendee:
+            return {
+                "success": False,
+                "message": "Attendee not found - Please contact organizer",
+                "attendee": None
+            }
+        
+        # Convert row to model for easier handling
+        attendee_model = db.query(models.Attendee).filter(models.Attendee.id == attendee_id).first()
+        
+        # Check if already checked in (double-check after lock)
+        if attendee_model.checked_in:
+            import pytz
+            ist = pytz.timezone('Asia/Kolkata')
+            checkin_time_str = attendee_model.checkin_time.astimezone(ist).strftime('%I:%M %p on %d %b %Y')
+            return {
+                "success": False,
+                "message": f"✅ {attendee_model.name} (Roll: {attendee_model.roll_number}) is already checked in at {checkin_time_str}",
+                "attendee": attendee_model
+            }
+        
+        # Check-in with timestamp
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        current_time = datetime.now(ist)
+        
+        attendee_model.checked_in = True
+        attendee_model.checkin_time = current_time
+        attendee_model.checked_by = current_user.id
+        
+        try:
+            db.commit()
+            db.refresh(attendee_model)
+            
+            # Log activity
+            log_activity(
+                db, current_user.id, "checkin_scan", "attendee", attendee_model.id,
+                f"Checked in: {attendee_model.name} ({attendee_model.roll_number}) via QR scan"
+            )
+            
+            # Format success message with person's details
+            checkin_time_str = current_time.strftime('%I:%M %p on %d %b %Y')
+            success_message = f"✅ Check-in successful!\n\n👤 Name: {attendee_model.name}\n🎓 Roll Number: {attendee_model.roll_number}\n🏫 Branch: {attendee_model.branch}\n📅 Checked in at: {checkin_time_str}"
+            
+            return {
+                "success": True,
+                "message": success_message,
+                "attendee": attendee_model
+            }
+            
+        except Exception as db_error:
+            db.rollback()
+            return {
+                "success": False,
+                "message": f"Database error during check-in: {str(db_error)}",
+                "attendee": None
+            }
+    
+    except ValueError as e:
+        error_msg = str(e)
+        if "expired" in error_msg.lower():
+            return {
+                "success": False,
+                "message": "❌ QR code has expired - Please request a new QR code",
+                "attendee": None
+            }
+        elif "invalid" in error_msg.lower():
+            return {
+                "success": False,
+                "message": "❌ Invalid QR code - Please scan a valid QR code",
+                "attendee": None
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"❌ QR code error: {error_msg}",
+                "attendee": None
+            }
+    except Exception as e:
+        # Log unexpected errors
+        print(f"❌ Unexpected error in QR scan: {str(e)}")
+        return {
+            "success": False,
+            "message": "❌ An unexpected error occurred. Please try again or contact support.",
             "attendee": None
         }
 
@@ -1575,40 +1722,65 @@ async def manual_checkin(
     db: Session = Depends(get_db)
 ):
     """
-    Manual check-in for an attendee
+    Manual check-in for an attendee with race condition handling
     """
-    attendee = db.query(models.Attendee).filter(models.Attendee.id == attendee_id).first()
+    # Get attendee with row-level lock to prevent race conditions
+    from sqlalchemy import text
+    attendee_row = db.execute(
+        text("SELECT * FROM attendees WHERE id = :attendee_id FOR UPDATE"),
+        {"attendee_id": attendee_id}
+    ).fetchone()
     
-    if not attendee:
+    if not attendee_row:
         raise HTTPException(status_code=404, detail="Attendee not found")
+    
+    # Get attendee model for easier handling
+    attendee = db.query(models.Attendee).filter(models.Attendee.id == attendee_id).first()
     
     # Check event access
     event = db.query(models.Event).filter(models.Event.id == attendee.event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
     if current_user.role != "admin" and event.club_id != current_user.club_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
-    # Check if already checked in
+    # Check if already checked in (double-check after lock)
     if attendee.checked_in:
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        checkin_time_str = attendee.checkin_time.astimezone(ist).strftime('%I:%M %p on %d %b %Y')
         raise HTTPException(
             status_code=400,
-            detail=f"Already checked in at {attendee.checkin_time.strftime('%I:%M %p')}"
+            detail=f"✅ {attendee.name} (Roll: {attendee.roll_number}) is already checked in at {checkin_time_str}"
         )
     
-    # Check-in
-    import pytz
-    ist = pytz.timezone('Asia/Kolkata')
-    attendee.checked_in = True
-    attendee.checkin_time = datetime.now(ist)
-    attendee.checked_by = current_user.id
-    db.commit()
-    
-    # Log activity
-    log_activity(
-        db, current_user.id, "checkin_manual", "attendee", attendee.id,
-        f"Manually checked in: {attendee.name} ({attendee.roll_number})"
-    )
-    
-    return {"message": f"Successfully checked in: {attendee.name}"}
+    try:
+        # Check-in with timestamp
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        current_time = datetime.now(ist)
+        
+        attendee.checked_in = True
+        attendee.checkin_time = current_time
+        attendee.checked_by = current_user.id
+        db.commit()
+        
+        # Log activity
+        log_activity(
+            db, current_user.id, "checkin_manual", "attendee", attendee.id,
+            f"Manually checked in: {attendee.name} ({attendee.roll_number})"
+        )
+        
+        # Format success message with person's details
+        checkin_time_str = current_time.strftime('%I:%M %p on %d %b %Y')
+        success_message = f"✅ Manual check-in successful!\n\n👤 Name: {attendee.name}\n🎓 Roll Number: {attendee.roll_number}\n🏫 Branch: {attendee.branch}\n📅 Checked in at: {checkin_time_str}"
+        
+        return {"message": success_message}
+        
+    except Exception as db_error:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error during check-in: {str(db_error)}")
 
 
 # Continue to next message for Dashboard and Export endpoints...
