@@ -276,6 +276,11 @@ def sync_payments_and_create_attendees():
                                                 event_name=event.name
                                             )
                                             
+                                            # Save QR code to static folder
+                                            qr_filename = f"attendee_{attendee.id}_{event.id}.png"
+                                            qr_filepath = utils.save_qr_code(qr_code_bytes, qr_filename)
+                                            print(f"💾 QR code saved to: {qr_filepath}")
+                                            
                                             # Send email
                                             email_success, error_msg = utils.send_qr_email(
                                                 to_email=attendee.email,
@@ -1339,6 +1344,11 @@ async def generate_and_send_qr(
                     attendee_name=attendee.name,
                     event_name=event.name
                 )
+                
+                # Save QR code to static folder
+                qr_filename = f"attendee_{attendee.id}_{event.id}.png"
+                qr_filepath = utils.save_qr_code(qr_code_bytes, qr_filename)
+                print(f"💾 QR code saved to: {qr_filepath}")
                 
                 # Send email
                 email_success, error_msg = utils.send_qr_email(
