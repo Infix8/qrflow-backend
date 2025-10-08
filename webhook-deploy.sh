@@ -6,9 +6,9 @@
 set -e
 
 # Configuration
-PROJECT_DIR="/home/ubuntu/qrflow-backend"
+PROJECT_DIR="/home/smec/qrflow-backend"
 WEBHOOK_SECRET="your_webhook_secret_here"  # Change this to a secure secret
-LOG_FILE="/var/log/qrflow-webhook.log"
+LOG_FILE="/home/smec/qrflow-backend/logs/webhook.log"
 
 # Function to log messages
 log_message() {

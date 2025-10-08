@@ -13,9 +13,9 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-PROJECT_DIR="/home/ubuntu/qrflow-backend"
-LOG_FILE="/var/log/qrflow-deploy.log"
-BACKUP_DIR="/opt/qrflow-backups"
+PROJECT_DIR="/home/smec/qrflow-backend"
+LOG_FILE="/home/smec/qrflow-backend/logs/deploy.log"
+BACKUP_DIR="/home/smec/qrflow-backend/backups"
 
 # Function to print colored output
 print_status() {
