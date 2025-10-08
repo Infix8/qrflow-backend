@@ -13,28 +13,40 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-PROJECT_DIR="/home/smec/qrflow-backend"
-LOG_FILE="/home/smec/qrflow-backend/logs/deploy.log"
-BACKUP_DIR="/home/smec/qrflow-backend/backups"
+PROJECT_DIR="$(pwd)"
+LOG_FILE="$(pwd)/logs/deploy.log"
+BACKUP_DIR="$(pwd)/backups"
 
 # Function to print colored output
 print_status() {
     echo -e "${GREEN}[INFO]${NC} $1"
+    # Create log file if it doesn't exist
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE"
     echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1" >> $LOG_FILE
 }
 
 print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
+    # Create log file if it doesn't exist
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE"
     echo "$(date '+%Y-%m-%d %H:%M:%S') [WARNING] $1" >> $LOG_FILE
 }
 
 print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+    # Create log file if it doesn't exist
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE"
     echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] $1" >> $LOG_FILE
 }
 
 print_header() {
     echo -e "${BLUE}[AUTO-DEPLOY]${NC} $1"
+    # Create log file if it doesn't exist
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE"
     echo "$(date '+%Y-%m-%d %H:%M:%S') [AUTO-DEPLOY] $1" >> $LOG_FILE
 }
 

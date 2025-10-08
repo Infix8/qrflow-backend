@@ -13,8 +13,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-PROJECT_DIR="/home/smec/qrflow-backend"
-SERVICE_USER="smec"
+PROJECT_DIR="$(pwd)"
+SERVICE_USER="$(whoami)"
 
 # Function to print colored output
 print_status() {

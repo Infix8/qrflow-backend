@@ -6,9 +6,9 @@
 set -e
 
 # Configuration
-PROJECT_DIR="/home/smec/qrflow-backend"
+PROJECT_DIR="$(pwd)"
 WEBHOOK_SECRET="your_webhook_secret_here"  # Change this to a secure secret
-LOG_FILE="/home/smec/qrflow-backend/logs/webhook.log"
+LOG_FILE="$(pwd)/logs/webhook.log"
 
 # Function to log messages
 log_message() {

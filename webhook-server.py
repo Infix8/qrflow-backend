@@ -15,8 +15,8 @@ import threading
 
 # Configuration
 WEBHOOK_SECRET = "your_webhook_secret_here"  # Change this to a secure secret
-PROJECT_DIR = "/home/smec/qrflow-backend"
-LOG_FILE = "/home/smec/qrflow-backend/logs/webhook.log"
+PROJECT_DIR = os.getcwd()
+LOG_FILE = os.path.join(PROJECT_DIR, "logs", "webhook.log")
 
 def log_message(message):
     """Log message to file"""
