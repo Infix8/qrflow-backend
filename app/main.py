@@ -1483,6 +1483,112 @@ async def resend_qr_to_attendee(
 
 # ============= Check-in Endpoints =============
 
+@app.post("/api/checkin/status")
+async def check_attendee_status(
+    checkin_request: schemas.CheckInRequest,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Check if attendee is already checked in without performing check-in
+    Useful for status checking before actual check-in
+    """
+    try:
+        # Verify QR token
+        payload = utils.verify_qr_token(checkin_request.qr_token)
+        
+        event_id = payload.get("event_id")
+        attendee_id = payload.get("attendee_id")
+        
+        # Validate payload
+        if not event_id or not attendee_id:
+            return {
+                "success": False,
+                "message": "Invalid QR code - Missing event or attendee information",
+                "attendee": None,
+                "is_checked_in": False
+            }
+        
+        # Get attendee
+        attendee = db.query(models.Attendee).filter(models.Attendee.id == attendee_id).first()
+        if not attendee:
+            return {
+                "success": False,
+                "message": "Attendee not found - Please contact organizer",
+                "attendee": None,
+                "is_checked_in": False
+            }
+        
+        # Check access
+        event = db.query(models.Event).filter(models.Event.id == event_id).first()
+        if not event:
+            return {
+                "success": False,
+                "message": "Event not found - Please contact organizer",
+                "attendee": None,
+                "is_checked_in": False
+            }
+        
+        if current_user.role != "admin" and event.club_id != current_user.club_id:
+            return {
+                "success": False,
+                "message": "Access denied - You are not authorized for this event",
+                "attendee": None,
+                "is_checked_in": False
+            }
+        
+        # Return status
+        if attendee.checked_in:
+            import pytz
+            ist = pytz.timezone('Asia/Kolkata')
+            checkin_time_str = attendee.checkin_time.astimezone(ist).strftime('%I:%M %p on %d %b %Y')
+            return {
+                "success": True,
+                "message": f"✅ {attendee.name} (Roll: {attendee.roll_number}) is already checked in at {checkin_time_str}",
+                "attendee": attendee,
+                "is_checked_in": True,
+                "checkin_time": attendee.checkin_time.isoformat() if attendee.checkin_time else None
+            }
+        else:
+            return {
+                "success": True,
+                "message": f"✅ {attendee.name} (Roll: {attendee.roll_number}) is ready for check-in",
+                "attendee": attendee,
+                "is_checked_in": False,
+                "checkin_time": None
+            }
+    
+    except ValueError as e:
+        error_msg = str(e)
+        if "expired" in error_msg.lower():
+            return {
+                "success": False,
+                "message": "❌ QR code has expired - Please request a new QR code",
+                "attendee": None,
+                "is_checked_in": False
+            }
+        elif "invalid" in error_msg.lower():
+            return {
+                "success": False,
+                "message": "❌ Invalid QR code - Please scan a valid QR code",
+                "attendee": None,
+                "is_checked_in": False
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"❌ QR code error: {error_msg}",
+                "attendee": None,
+                "is_checked_in": False
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"❌ An unexpected error occurred: {str(e)}",
+            "attendee": None,
+            "is_checked_in": False
+        }
+
 @app.post("/api/checkin/validate")
 async def validate_qr_token(
     checkin_request: schemas.CheckInRequest,
@@ -1538,14 +1644,22 @@ async def validate_qr_token(
                 "event": None
             }
         
-        # Return attendee and event information
+        # Check if already checked in
+        if attendee.checked_in:
+            import pytz
+            ist = pytz.timezone('Asia/Kolkata')
+            checkin_time_str = attendee.checkin_time.astimezone(ist).strftime('%I:%M %p on %d %b %Y')
+            return {
+                "success": False,
+                "message": f"✅ {attendee.name} (Roll: {attendee.roll_number}) is already checked in at {checkin_time_str}",
+                "attendee": attendee
+            }
+        
+        # Return attendee and event information for valid QR
         return {
             "success": True,
-            "message": f"✅ Valid QR code for {attendee.name} (Roll: {attendee.roll_number})",
-            "attendee": attendee,
-            "event": event,
-            "already_checked_in": attendee.checked_in,
-            "checkin_time": attendee.checkin_time.isoformat() if attendee.checkin_time else None
+            "message": f"✅ Valid QR code for {attendee.name} (Roll: {attendee.roll_number}) - Ready for check-in",
+            "attendee": attendee
         }
     
     except ValueError as e:
