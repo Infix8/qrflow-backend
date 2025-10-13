@@ -71,6 +71,59 @@ app.add_middleware(
 
 # ============= Helper Functions =============
 
+def parse_year_from_string(year_str: str) -> int:
+    """
+    Parse year from various string formats including Roman numerals and text
+    Handles: "1", "2nd", "3rd", "4th", "II", "III", "IV", "first", "second", etc.
+    """
+    import re
+    
+    if not year_str:
+        return 1
+    
+    year_str = year_str.strip().lower()
+    
+    # Handle Roman numerals
+    roman_to_int = {
+        'i': 1, 'ii': 2, 'iii': 3, 'iv': 4, 'v': 5,
+        '1': 1, '2': 2, '3': 3, '4': 4, '5': 5
+    }
+    
+    # Handle text formats
+    text_to_int = {
+        'first': 1, '1st': 1, '1nd': 1, '1rd': 1,
+        'second': 2, '2nd': 2, '2st': 2, '2rd': 2,
+        'third': 3, '3rd': 3, '3nd': 3, '3st': 3,
+        'fourth': 4, '4th': 4, '4nd': 4, '4st': 4, '4rd': 4,
+        'fifth': 5, '5th': 5, '5nd': 5, '5st': 5, '5rd': 5
+    }
+    
+    # Try direct mapping first
+    if year_str in roman_to_int:
+        year = roman_to_int[year_str]
+        return year if 1 <= year <= 5 else 1
+    
+    if year_str in text_to_int:
+        year = text_to_int[year_str]
+        return year if 1 <= year <= 5 else 1
+    
+    # Try to extract number from string like "3rd year", "II semester", etc.
+    number_match = re.search(r'(\d+)', year_str)
+    if number_match:
+        year = int(number_match.group(1))
+        return year if 1 <= year <= 5 else 1
+    
+    # Try to extract Roman numeral from string
+    roman_match = re.search(r'\b([iv]+)\b', year_str)
+    if roman_match:
+        roman_num = roman_match.group(1).lower()
+        if roman_num in roman_to_int:
+            year = roman_to_int[roman_num]
+            return year if 1 <= year <= 5 else 1
+    
+    # Default to 1 if nothing matches
+    return 1
+
 def log_activity(
     db: Session,
     user_id: int,
@@ -234,6 +287,31 @@ def sync_payments_and_create_attendees():
                                 ).first()
                                 
                                 if not existing_attendee:
+                                    # Extract year and section from form data
+                                    year = 1  # Default year
+                                    section = "A"  # Default section
+                                    
+                                    # Try to parse year and section from original_notes
+                                    try:
+                                        if isinstance(notes, dict):
+                                            # Extract year from year_of_study field
+                                            year_str = notes.get("year_of_study", "1")
+                                            if year_str:
+                                                year = parse_year_from_string(str(year_str))
+                                            
+                                # Extract section
+                                section_str = notes.get("section", "A")
+                                if section_str:
+                                    section = str(section_str).strip().upper()
+                                    # Ensure section is valid (single letter or valid section code)
+                                    if not section or len(section) > 2 or section not in ['A', 'B', 'C', 'D']:
+                                        section = "A"
+                        except Exception as e:
+                            print(f"⚠️ Error parsing year/section for {student_name}: {str(e)}")
+                            # Use defaults
+                            year = 1
+                            section = "A"
+                                    
                                     # Create new attendee
                                     attendee = models.Attendee(
                                         event_id=event_id,
@@ -241,8 +319,8 @@ def sync_payments_and_create_attendees():
                                         email=email,
                                         roll_number=roll_number,
                                         branch=department.upper() if department else "UNKNOWN",
-                                        year=1,  # Default year
-                                        section="A",  # Default section
+                                        year=year,
+                                        section=section,
                                         phone=phone,
                                         gender="Not Specified"
                                     )
@@ -965,14 +1043,14 @@ async def delete_event(
 
 # ============= Attendee Management =============
 
-@app.get("/api/events/{event_id}/attendees", response_model=List[schemas.AttendeeWithChecker])
+@app.get("/api/events/{event_id}/attendees")
 async def get_event_attendees(
     event_id: int,
     current_user: models.User = Depends(require_organizer),
     db: Session = Depends(get_db)
 ):
     """
-    Get all attendees for an event
+    Get all attendees for an event with payment details
     """
     # Check event access
     event = db.query(models.Event).filter(models.Event.id == event_id).first()
@@ -983,7 +1061,62 @@ async def get_event_attendees(
         raise HTTPException(status_code=403, detail="Access denied")
     
     attendees = db.query(models.Attendee).filter(models.Attendee.event_id == event_id).all()
-    return attendees
+    
+    # Enrich attendees with payment information
+    enriched_attendees = []
+    for attendee in attendees:
+        # Get payment information for this attendee
+        payment = db.query(models.Payment).filter(
+            models.Payment.event_id == event_id,
+            (models.Payment.customer_email == attendee.email) | 
+            (models.Payment.customer_phone == attendee.phone)
+        ).first()
+        
+        # Create enriched attendee data
+        attendee_data = {
+            "id": attendee.id,
+            "name": attendee.name,
+            "email": attendee.email,
+            "roll_number": attendee.roll_number,
+            "branch": attendee.branch,
+            "year": attendee.year,
+            "section": attendee.section,
+            "phone": attendee.phone,
+            "gender": attendee.gender,
+            "qr_generated": attendee.qr_generated,
+            "qr_generated_at": attendee.qr_generated_at.isoformat() if attendee.qr_generated_at else None,
+            "email_sent": attendee.email_sent,
+            "email_sent_at": attendee.email_sent_at.isoformat() if attendee.email_sent_at else None,
+            "email_error": attendee.email_error,
+            "checked_in": attendee.checked_in,
+            "checkin_time": attendee.checkin_time.isoformat() if attendee.checkin_time else None,
+            "checked_by": attendee.checked_by,
+            "checker_name": attendee.checker.username if attendee.checker else None,
+            "created_at": attendee.created_at.isoformat(),
+            "updated_at": attendee.updated_at.isoformat(),
+            "payment": None
+        }
+        
+        # Add payment details if available
+        if payment:
+            attendee_data["payment"] = {
+                "id": payment.id,
+                "razorpay_payment_id": payment.razorpay_payment_id,
+                "amount": payment.amount,
+                "currency": payment.currency,
+                "status": payment.status,
+                "customer_name": payment.customer_name,
+                "customer_email": payment.customer_email,
+                "customer_phone": payment.customer_phone,
+                "form_data": payment.form_data,
+                "created_at": payment.created_at.isoformat(),
+                "updated_at": payment.updated_at.isoformat(),
+                "payment_captured_at": payment.payment_captured_at.isoformat() if payment.payment_captured_at else None
+            }
+        
+        enriched_attendees.append(attendee_data)
+    
+    return enriched_attendees
 
 
 @app.get("/api/events/{event_id}/attendees/template")
@@ -2113,6 +2246,102 @@ async def manual_sync_payments(
     except Exception as e:
         print(f"❌ Manual sync error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Manual sync failed: {str(e)}")
+
+
+@app.post("/api/payments/fix-attendee-details")
+async def fix_attendee_details_from_payments(
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Fix attendee year and section details from existing payment form_data
+    This endpoint updates existing attendees with correct year and section from payment data
+    """
+    try:
+        print(f"🔧 Fixing attendee details from payments triggered by {current_user.username}")
+        
+        # Get all payments with form_data
+        payments = db.query(models.Payment).filter(
+            models.Payment.form_data.isnot(None),
+            models.Payment.status == "captured"
+        ).all()
+        
+        updated_count = 0
+        errors = []
+        
+        for payment in payments:
+            try:
+                # Parse form_data
+                import json
+                form_data = json.loads(payment.form_data)
+                original_notes = form_data.get("original_notes", {})
+                
+                if not original_notes:
+                    continue
+                
+                # Extract year and section
+                year = 1  # Default
+                section = "A"  # Default
+                
+                # Extract year from year_of_study field
+                year_str = original_notes.get("year_of_study", "1")
+                if year_str:
+                    year = parse_year_from_string(str(year_str))
+                
+                # Extract section
+                section_str = original_notes.get("section", "A")
+                if section_str:
+                    section = str(section_str).strip().upper()
+                    # Ensure section is valid (single letter or valid section code)
+                    if not section or len(section) > 2 or section not in ['A', 'B', 'C', 'D']:
+                        section = "A"
+                
+                # Find matching attendee
+                attendee = db.query(models.Attendee).filter(
+                    models.Attendee.event_id == payment.event_id,
+                    (models.Attendee.email == payment.customer_email) | 
+                    (models.Attendee.roll_number == original_notes.get("roll_number", ""))
+                ).first()
+                
+                if attendee:
+                    # Update attendee if year or section is different
+                    updated = False
+                    if attendee.year != year:
+                        attendee.year = year
+                        updated = True
+                    if attendee.section != section:
+                        attendee.section = section
+                        updated = True
+                    
+                    if updated:
+                        db.commit()
+                        updated_count += 1
+                        print(f"✅ Updated attendee {attendee.name}: year={year}, section={section}")
+                
+            except Exception as e:
+                error_msg = f"Error processing payment {payment.id}: {str(e)}"
+                errors.append(error_msg)
+                print(f"❌ {error_msg}")
+        
+        # Log activity
+        log_activity(
+            db, current_user.id, "fix_attendee_details", "payment", None,
+            f"Fixed attendee details for {updated_count} attendees from payment data"
+        )
+        
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        return {
+            "success": True,
+            "message": f"Fixed attendee details for {updated_count} attendees",
+            "updated_count": updated_count,
+            "errors": errors[:10],  # Return first 10 errors
+            "timestamp": datetime.now(ist).isoformat()
+        }
+        
+    except Exception as e:
+        print(f"❌ Fix attendee details error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Fix attendee details failed: {str(e)}")
 
 
 # ============= Payment Management =============
