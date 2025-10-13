@@ -1,7 +1,7 @@
 """
 Main FastAPI Application - All API endpoints
 """
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Request
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -12,8 +12,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 import json
 import io
+import os
 import razorpay
-import asyncio
 import threading
 import time
 
@@ -30,8 +30,9 @@ from .security import (
 )
 from .config import settings
 
-# Create database tables
-models.Base.metadata.create_all(bind=engine)
+# Create database tables (only if not in testing mode)
+if os.getenv("ENVIRONMENT", "development") != "testing":
+    models.Base.metadata.create_all(bind=engine)
 
 # Initialize Razorpay client (lazy initialization)
 def get_razorpay_client():
@@ -71,58 +72,78 @@ app.add_middleware(
 
 # ============= Helper Functions =============
 
-def parse_year_from_string(year_str: str) -> int:
+def normalize_year(year_str: str) -> int:
     """
-    Parse year from various string formats including Roman numerals and text
+    Normalize year string to integer (1-4) - Enhanced version
     Handles: "1", "2nd", "3rd", "4th", "II", "III", "IV", "first", "second", etc.
     """
     import re
     
     if not year_str:
         return 1
-    
-    year_str = year_str.strip().lower()
+        
+    year_str = str(year_str).strip().upper()
     
     # Handle Roman numerals
-    roman_to_int = {
-        'i': 1, 'ii': 2, 'iii': 3, 'iv': 4, 'v': 5,
-        '1': 1, '2': 2, '3': 3, '4': 4, '5': 5
-    }
+    roman_to_num = {'I': 1, 'II': 2, 'III': 3, 'IV': 4}
+    if year_str in roman_to_num:
+        return roman_to_num[year_str]
+    
+    # Extract numbers from strings like "3rd", "2ND", "1st"
+    number_match = re.search(r'\d+', year_str)
+    if number_match:
+        year_num = int(number_match.group())
+        if 1 <= year_num <= 4:
+            return year_num
+    
+    # Handle common variations
+    year_str = year_str.replace('ST', '').replace('ND', '').replace('RD', '').replace('TH', '')
+    if year_str.isdigit():
+        year_num = int(year_str)
+        if 1 <= year_num <= 4:
+            return year_num
     
     # Handle text formats
     text_to_int = {
-        'first': 1, '1st': 1, '1nd': 1, '1rd': 1,
-        'second': 2, '2nd': 2, '2st': 2, '2rd': 2,
-        'third': 3, '3rd': 3, '3nd': 3, '3st': 3,
-        'fourth': 4, '4th': 4, '4nd': 4, '4st': 4, '4rd': 4,
-        'fifth': 5, '5th': 5, '5nd': 5, '5st': 5, '5rd': 5
+        'FIRST': 1, 'SECOND': 2, 'THIRD': 3, 'FOURTH': 4
     }
-    
-    # Try direct mapping first
-    if year_str in roman_to_int:
-        year = roman_to_int[year_str]
-        return year if 1 <= year <= 5 else 1
-    
     if year_str in text_to_int:
-        year = text_to_int[year_str]
-        return year if 1 <= year <= 5 else 1
+        return text_to_int[year_str]
     
-    # Try to extract number from string like "3rd year", "II semester", etc.
-    number_match = re.search(r'(\d+)', year_str)
-    if number_match:
-        year = int(number_match.group(1))
-        return year if 1 <= year <= 5 else 1
-    
-    # Try to extract Roman numeral from string
-    roman_match = re.search(r'\b([iv]+)\b', year_str)
-    if roman_match:
-        roman_num = roman_match.group(1).lower()
-        if roman_num in roman_to_int:
-            year = roman_to_int[roman_num]
-            return year if 1 <= year <= 5 else 1
-    
-    # Default to 1 if nothing matches
+    print(f"⚠️ Could not normalize year: '{year_str}', using default 1")
     return 1
+
+
+def normalize_section(section_str: str) -> str:
+    """
+    Normalize section string to single letter (A-Z)
+    """
+    import re
+    
+    if not section_str:
+        return "A"
+        
+    section_str = str(section_str).strip().upper()
+    
+    # Handle patterns like "CSM A", "CSM c", "SECTION B"
+    # Extract the last letter from the string
+    letter_match = re.search(r'([A-Z])$', section_str)
+    if letter_match:
+        return letter_match.group(1)
+    
+    # If it's just a single letter
+    if len(section_str) == 1 and section_str.isalpha():
+        return section_str
+    
+    print(f"⚠️ Could not normalize section: '{section_str}', using default A")
+    return "A"
+
+
+def parse_year_from_string(year_str: str) -> int:
+    """
+    Legacy function for backward compatibility
+    """
+    return normalize_year(year_str)
 
 def log_activity(
     db: Session,
@@ -280,61 +301,63 @@ def sync_payments_and_create_attendees():
                         # Create attendee if payment is captured and we have student details
                         if status == "captured" and student_name != "Unknown" and roll_number:
                             try:
-                                # Check if attendee already exists
+                                # Check if attendee already exists (prevent duplicates)
                                 existing_attendee = db.query(models.Attendee).filter(
                                     models.Attendee.event_id == event_id,
                                     (models.Attendee.email == email) | (models.Attendee.roll_number == roll_number)
                                 ).first()
                                 
-                                if not existing_attendee:
-                                    # Extract year and section from form data
-                                    year = 1  # Default year
-                                    section = "A"  # Default section
-                                    
-                                    # Try to parse year and section from original_notes
-                                    try:
-                                        if isinstance(notes, dict):
-                                            # Extract year from year_of_study field
-                                            year_str = notes.get("year_of_study", "1")
-                                            if year_str:
-                                                year = parse_year_from_string(str(year_str))
-                                            
-                                # Extract section
-                                section_str = notes.get("section", "A")
-                                if section_str:
-                                    section = str(section_str).strip().upper()
-                                    # Ensure section is valid (single letter or valid section code)
-                                    if not section or len(section) > 2 or section not in ['A', 'B', 'C', 'D']:
-                                        section = "A"
-                        except Exception as e:
-                            print(f"⚠️ Error parsing year/section for {student_name}: {str(e)}")
-                            # Use defaults
-                            year = 1
-                            section = "A"
-                                    
-                                    # Create new attendee
-                                    attendee = models.Attendee(
-                                        event_id=event_id,
-                                        name=student_name,
-                                        email=email,
-                                        roll_number=roll_number,
-                                        branch=department.upper() if department else "UNKNOWN",
-                                        year=year,
-                                        section=section,
-                                        phone=phone,
-                                        gender="Not Specified"
-                                    )
-                                    
-                                    db.add(attendee)
-                                    db.commit()
-                                    db.refresh(attendee)
-                                    attendees_created += 1
-                                    
-                                    # Generate QR token and send email
-                                    try:
-                                        # Get event details
-                                        event = db.query(models.Event).filter(models.Event.id == event_id).first()
-                                        if event:
+                                if existing_attendee:
+                                    print(f"⚠️ Attendee already exists: {student_name} ({email}) - skipping duplicate creation")
+                                    continue
+                                
+                                # Extract year and section from form data
+                                year = 1  # Default year
+                                section = "A"  # Default section
+                                
+                                # Parse year and section from original_notes using enhanced parsing
+                                try:
+                                    if isinstance(notes, dict):
+                                        # Extract year from year_of_study field
+                                        year_str = notes.get("year_of_study", "1")
+                                        year = normalize_year(year_str)
+                                        
+                                        # Extract section
+                                        section_str = notes.get("section", "A")
+                                        section = normalize_section(section_str)
+                                        
+                                        print(f"✅ Parsed year/section for {student_name}: Year={year}, Section={section}")
+                                except Exception as e:
+                                    print(f"⚠️ Error parsing year/section for {student_name}: {str(e)}")
+                                    # Use defaults
+                                    year = 1
+                                    section = "A"
+                                
+                                # Create new attendee
+                                attendee = models.Attendee(
+                                    event_id=event_id,
+                                    name=student_name,
+                                    email=email,
+                                    roll_number=roll_number,
+                                    branch=department.upper() if department else "UNKNOWN",
+                                    year=year,
+                                    section=section,
+                                    phone=phone,
+                                    gender="Not Specified"
+                                )
+                                
+                                db.add(attendee)
+                                db.commit()
+                                db.refresh(attendee)
+                                attendees_created += 1
+                                
+                                # Generate QR token only (no email sent automatically)
+                                try:
+                                    # Get event details
+                                    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+                                    if event:
+                                        # Check if QR token already exists (to prevent conflicts)
+                                        if not attendee.qr_token:
                                             # Generate QR token
                                             qr_token = utils.generate_qr_token(
                                                 event_id=event.id,
@@ -346,44 +369,28 @@ def sync_payments_and_create_attendees():
                                             attendee.qr_token = qr_token
                                             attendee.qr_generated = True
                                             attendee.qr_generated_at = datetime.now(ist)
-                                            
-                                            # Generate QR code image
-                                            qr_code_bytes = utils.generate_qr_code(
-                                                token=attendee.qr_token,
-                                                attendee_name=attendee.name,
-                                                event_name=event.name
-                                            )
-                                            
-                                            # Save QR code to static folder
-                                            qr_filename = f"attendee_{attendee.id}_{event.id}.png"
-                                            qr_filepath = utils.save_qr_code(qr_code_bytes, qr_filename)
-                                            print(f"💾 QR code saved to: {qr_filepath}")
-                                            
-                                            # Send email
-                                            email_success, error_msg = utils.send_qr_email(
-                                                to_email=attendee.email,
-                                                attendee_name=attendee.name,
-                                                event_name=event.name,
-                                                event_date=event.date,
-                                                event_venue=event.venue or "TBA",
-                                                qr_code_bytes=qr_code_bytes
-                                            )
-                                            
-                                            if email_success:
-                                                attendee.email_sent = True
-                                                attendee.email_sent_at = datetime.now(ist)
-                                                attendee.email_error = None
-                                                print(f"📧 QR code sent to: {attendee.email}")
-                                            else:
-                                                attendee.email_error = error_msg
-                                                print(f"❌ Email failed for {attendee.email}: {error_msg}")
-                                            
-                                            db.commit()
-                                    
-                                    except Exception as e:
-                                        print(f"❌ Error creating QR for {attendee.email}: {str(e)}")
-                                        attendee.email_error = str(e)
+                                        
+                                        # Generate QR code image
+                                        qr_code_bytes = utils.generate_qr_code(
+                                            token=attendee.qr_token,
+                                            attendee_name=attendee.name,
+                                            event_name=event.name
+                                        )
+                                        
+                                        # Save QR code to static folder
+                                        qr_filename = f"attendee_{attendee.id}_{event.id}.png"
+                                        qr_filepath = utils.save_qr_code(qr_code_bytes, qr_filename)
+                                        print(f"💾 QR code saved to: {qr_filepath}")
+                                        
+                                        # Note: Email will be sent manually via "Send All" or individual send
+                                        print(f"✅ QR code generated for: {attendee.email} (email not sent automatically)")
+                                        
                                         db.commit()
+                                
+                                except Exception as e:
+                                    print(f"❌ Error creating QR for {attendee.email}: {str(e)}")
+                                    attendee.email_error = str(e)
+                                    db.commit()
                                 
                             except Exception as e:
                                 print(f"❌ Error creating attendee for {student_name}: {str(e)}")
@@ -424,8 +431,9 @@ def start_background_scheduler():
     print("🔄 Background payment sync scheduler started (every 30 minutes)")
 
 
-# Start the background scheduler when the app starts
-start_background_scheduler()
+# Start the background scheduler when the app starts (only in production/development, not during testing)
+if os.getenv("ENVIRONMENT", "development") != "testing":
+    start_background_scheduler()
 
 
 
@@ -1247,6 +1255,50 @@ async def upload_attendees_csv(
         
         db.commit()
         
+        # Generate QR codes for all uploaded attendees
+        if added_count > 0:
+            print(f"🔄 Generating QR codes for {added_count} uploaded attendees...")
+            qr_generated_count = 0
+            
+            # Get all attendees that were just uploaded (without QR tokens)
+            uploaded_attendees = db.query(models.Attendee).filter(
+                models.Attendee.event_id == event_id,
+                models.Attendee.qr_token.is_(None)
+            ).all()
+            
+            for attendee in uploaded_attendees:
+                try:
+                    # Generate QR token
+                    qr_token = utils.generate_qr_token(
+                        event_id=event.id,
+                        attendee_id=attendee.id,
+                        email=attendee.email,
+                        roll_number=attendee.roll_number,
+                        event_date=event.date
+                    )
+                    attendee.qr_token = qr_token
+                    attendee.qr_generated = True
+                    attendee.qr_generated_at = datetime.now()
+                    
+                    # Generate QR code image
+                    qr_code_bytes = utils.generate_qr_code(
+                        token=attendee.qr_token,
+                        attendee_name=attendee.name,
+                        event_name=event.name
+                    )
+                    
+                    # Save QR code to static folder
+                    qr_filename = f"attendee_{attendee.id}_{event.id}.png"
+                    qr_filepath = utils.save_qr_code(qr_code_bytes, qr_filename)
+                    qr_generated_count += 1
+                    
+                except Exception as e:
+                    print(f"❌ Error generating QR for {attendee.email}: {str(e)}")
+                    attendee.email_error = str(e)
+            
+            db.commit()
+            print(f"✅ Generated QR codes for {qr_generated_count} attendees (emails not sent automatically)")
+        
         # Log activity
         log_activity(
             db, current_user.id, "upload_attendees", "event", event_id,
@@ -1307,6 +1359,40 @@ async def create_attendee(
     db.add(attendee)
     db.commit()
     db.refresh(attendee)
+    
+    # Generate QR token for the attendee (if not already exists)
+    try:
+        if not attendee.qr_token:
+            qr_token = utils.generate_qr_token(
+                event_id=event.id,
+                attendee_id=attendee.id,
+                email=attendee.email,
+                roll_number=attendee.roll_number,
+                event_date=event.date
+            )
+            attendee.qr_token = qr_token
+            attendee.qr_generated = True
+            attendee.qr_generated_at = datetime.now()
+        
+        # Generate QR code image
+        qr_code_bytes = utils.generate_qr_code(
+            token=attendee.qr_token,
+            attendee_name=attendee.name,
+            event_name=event.name
+        )
+        
+        # Save QR code to static folder
+        qr_filename = f"attendee_{attendee.id}_{event.id}.png"
+        qr_filepath = utils.save_qr_code(qr_code_bytes, qr_filename)
+        print(f"💾 QR code saved to: {qr_filepath}")
+        
+        db.commit()
+        print(f"✅ QR code generated for: {attendee.email} (email not sent automatically)")
+        
+    except Exception as e:
+        print(f"❌ Error generating QR for {attendee.email}: {str(e)}")
+        attendee.email_error = str(e)
+        db.commit()
     
     # Log activity
     log_activity(
@@ -1415,14 +1501,14 @@ async def delete_attendee(
 
 # ============= QR Code Generation & Email =============
 
-@app.post("/api/events/{event_id}/generate-qr", response_model=schemas.BulkQRGenerateResponse)
-async def generate_and_send_qr(
+@app.post("/api/events/{event_id}/generate-qr-codes", response_model=schemas.BulkQRGenerateResponse)
+async def generate_qr_codes_for_attendees(
     event_id: int,
     current_user: models.User = Depends(require_organizer),
     db: Session = Depends(get_db)
 ):
     """
-    Generate QR codes and send via email (smart - only processes pending/failed)
+    Generate QR codes for all attendees who don't have them yet
     """
     # Check event access
     event = db.query(models.Event).filter(models.Event.id == event_id).first()
@@ -1432,11 +1518,10 @@ async def generate_and_send_qr(
     if current_user.role != "admin" and event.club_id != current_user.club_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
-    # Get attendees that need QR generation or email sending
-    # (qr_generated = False OR email_sent = False)
+    # Get attendees that don't have QR codes generated yet
     attendees = db.query(models.Attendee).filter(
         models.Attendee.event_id == event_id,
-        (models.Attendee.qr_generated == False) | (models.Attendee.email_sent == False)
+        models.Attendee.qr_token.is_(None)
     ).all()
     
     if not attendees:
@@ -1454,61 +1539,137 @@ async def generate_and_send_qr(
     
     for attendee in attendees:
         try:
-            # Generate QR token if not already generated
-            if not attendee.qr_generated or not attendee.qr_token:
-                qr_token = utils.generate_qr_token(
-                    event_id=event.id,
-                    attendee_id=attendee.id,
-                    email=attendee.email,
-                    roll_number=attendee.roll_number,
-                    event_date=event.date
-                )
-                attendee.qr_token = qr_token
-                attendee.qr_generated = True
+            # Generate QR token
+            qr_token = utils.generate_qr_token(
+                event_id=event.id,
+                attendee_id=attendee.id,
+                email=attendee.email,
+                roll_number=attendee.roll_number,
+                event_date=event.date
+            )
+            attendee.qr_token = qr_token
+            attendee.qr_generated = True
+            attendee.qr_generated_at = datetime.now()
+            
+            # Generate QR code image
+            qr_code_bytes = utils.generate_qr_code(
+                token=attendee.qr_token,
+                attendee_name=attendee.name,
+                event_name=event.name
+            )
+            
+            # Save QR code to static folder
+            qr_filename = f"attendee_{attendee.id}_{event.id}.png"
+            qr_filepath = utils.save_qr_code(qr_code_bytes, qr_filename)
+            
+            success += 1
+            print(f"✅ QR code generated for: {attendee.email}")
+            
+            db.commit()
+        
+        except Exception as e:
+            failed += 1
+            error_msg = str(e)
+            attendee.email_error = error_msg
+            db.commit()
+            
+            errors.append({
+                "attendee_id": attendee.id,
+                "name": attendee.name,
+                "email": attendee.email,
+                "error": error_msg
+            })
+            print(f"❌ Error generating QR for {attendee.email}: {error_msg}")
+    
+    # Log activity
+    log_activity(
+        db, current_user.id, "generate_qr_codes", "event", event_id,
+        f"Generated QR codes for {success} attendees in event: {event.name}"
+    )
+    
+    return {
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "errors": errors[:20]  # Return first 20 errors
+    }
+
+
+@app.post("/api/events/{event_id}/send-emails", response_model=schemas.BulkQRGenerateResponse)
+async def send_all_emails(
+    event_id: int,
+    current_user: models.User = Depends(require_organizer),
+    db: Session = Depends(get_db)
+):
+    """
+    Send QR code emails to all attendees who have QR codes generated but emails not sent
+    """
+    # Check event access
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if current_user.role != "admin" and event.club_id != current_user.club_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Get attendees that have QR codes generated but emails not sent
+    attendees = db.query(models.Attendee).filter(
+        models.Attendee.event_id == event_id,
+        models.Attendee.qr_generated == True,
+        models.Attendee.qr_token.isnot(None),
+        models.Attendee.email_sent == False
+    ).all()
+    
+    if not attendees:
+        return {
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "errors": []
+        }
+    
+    total = len(attendees)
+    success = 0
+    failed = 0
+    errors = []
+    
+    for attendee in attendees:
+        try:
+            # Generate QR code image (using existing QR token)
+            qr_code_bytes = utils.generate_qr_code(
+                token=attendee.qr_token,
+                attendee_name=attendee.name,
+                event_name=event.name
+            )
+            
+            # Send email
+            email_success, error_msg = utils.send_qr_email(
+                to_email=attendee.email,
+                attendee_name=attendee.name,
+                event_name=event.name,
+                event_date=event.date,
+                event_venue=event.venue or "TBA",
+                qr_code_bytes=qr_code_bytes
+            )
+            
+            if email_success:
+                attendee.email_sent = True
                 import pytz
                 ist = pytz.timezone('Asia/Kolkata')
-                attendee.qr_generated_at = datetime.now(ist)
-            
-            # Send email if not already sent
-            if not attendee.email_sent:
-                # Generate QR code image
-                qr_code_bytes = utils.generate_qr_code(
-                    token=attendee.qr_token,
-                    attendee_name=attendee.name,
-                    event_name=event.name
-                )
-                
-                # Save QR code to static folder
-                qr_filename = f"attendee_{attendee.id}_{event.id}.png"
-                qr_filepath = utils.save_qr_code(qr_code_bytes, qr_filename)
-                print(f"💾 QR code saved to: {qr_filepath}")
-                
-                # Send email
-                email_success, error_msg = utils.send_qr_email(
-                    to_email=attendee.email,
-                    attendee_name=attendee.name,
-                    event_name=event.name,
-                    event_date=event.date,
-                    event_venue=event.venue or "TBA",
-                    qr_code_bytes=qr_code_bytes
-                )
-                
-                if email_success:
-                    attendee.email_sent = True
-                    attendee.email_sent_at = datetime.now(ist)
-                    attendee.email_error = None
-                    success += 1
-                else:
-                    attendee.email_error = error_msg
-                    failed += 1
-                    errors.append({
-                        "attendee_id": attendee.id,
-                        "name": attendee.name,
-                        "email": attendee.email,
-                        "error": error_msg
-                    })
-            else:
+                attendee.email_sent_at = datetime.now(ist)
+                attendee.email_error = None
                 success += 1
+                print(f"📧 Email sent to: {attendee.email}")
+            else:
+                attendee.email_error = error_msg
+                failed += 1
+                errors.append({
+                    "attendee_id": attendee.id,
+                    "name": attendee.name,
+                    "email": attendee.email,
+                    "error": error_msg
+                })
+                print(f"❌ Email failed for {attendee.email}: {error_msg}")
             
             db.commit()
         
@@ -1527,8 +1688,8 @@ async def generate_and_send_qr(
     
     # Log activity
     log_activity(
-        db, current_user.id, "generate_qr", "event", event_id,
-        f"Generated QR codes for {success} attendees in event: {event.name}"
+        db, current_user.id, "send_emails", "event", event_id,
+        f"Sent QR code emails to {success} attendees in event: {event.name}"
     )
     
     return {
@@ -1539,14 +1700,14 @@ async def generate_and_send_qr(
     }
 
 
-@app.post("/api/attendees/{attendee_id}/resend-qr")
-async def resend_qr_to_attendee(
+@app.post("/api/attendees/{attendee_id}/send-email")
+async def send_email_to_attendee(
     attendee_id: int,
     current_user: models.User = Depends(require_organizer),
     db: Session = Depends(get_db)
 ):
     """
-    Resend QR code to a specific attendee
+    Send QR code email to a specific attendee (uses existing QR token for consistency)
     """
     attendee = db.query(models.Attendee).filter(models.Attendee.id == attendee_id).first()
     
@@ -1600,8 +1761,8 @@ async def resend_qr_to_attendee(
             
             # Log activity
             log_activity(
-                db, current_user.id, "resend_qr", "attendee", attendee_id,
-                f"Resent QR code to: {attendee.name} ({attendee.email})"
+                db, current_user.id, "send_email", "attendee", attendee_id,
+                f"Sent QR code email to: {attendee.name} ({attendee.email})"
             )
             
             return {"message": "QR code sent successfully", "success": True}
@@ -2254,7 +2415,7 @@ async def fix_attendee_details_from_payments(
     db: Session = Depends(get_db)
 ):
     """
-    Fix attendee year and section details from existing payment form_data
+    Fix attendee year and section details from existing payment form_data using enhanced parsing
     This endpoint updates existing attendees with correct year and section from payment data
     """
     try:
@@ -2268,60 +2429,96 @@ async def fix_attendee_details_from_payments(
         
         updated_count = 0
         errors = []
+        processed_count = 0
         
         for payment in payments:
             try:
+                processed_count += 1
+                print(f"📋 Processing payment {processed_count}/{len(payments)} (ID: {payment.id})")
+                
                 # Parse form_data
                 import json
                 form_data = json.loads(payment.form_data)
                 original_notes = form_data.get("original_notes", {})
                 
                 if not original_notes:
+                    print(f"    ⚠️ No original_notes in payment {payment.id}")
                     continue
                 
-                # Extract year and section
-                year = 1  # Default
-                section = "A"  # Default
-                
-                # Extract year from year_of_study field
+                # Extract year and section using enhanced parsing
                 year_str = original_notes.get("year_of_study", "1")
-                if year_str:
-                    year = parse_year_from_string(str(year_str))
-                
-                # Extract section
                 section_str = original_notes.get("section", "A")
-                if section_str:
-                    section = str(section_str).strip().upper()
-                    # Ensure section is valid (single letter or valid section code)
-                    if not section or len(section) > 2 or section not in ['A', 'B', 'C', 'D']:
-                        section = "A"
                 
-                # Find matching attendee
-                attendee = db.query(models.Attendee).filter(
-                    models.Attendee.event_id == payment.event_id,
-                    (models.Attendee.email == payment.customer_email) | 
-                    (models.Attendee.roll_number == original_notes.get("roll_number", ""))
-                ).first()
+                year = normalize_year(year_str)
+                section = normalize_section(section_str)
                 
-                if attendee:
-                    # Update attendee if year or section is different
-                    updated = False
-                    if attendee.year != year:
-                        attendee.year = year
-                        updated = True
-                    if attendee.section != section:
-                        attendee.section = section
-                        updated = True
-                    
-                    if updated:
-                        db.commit()
-                        updated_count += 1
-                        print(f"✅ Updated attendee {attendee.name}: year={year}, section={section}")
+                # Find matching attendee by multiple methods
+                attendee = None
+                
+                # Try by email from original_notes first
+                email_from_notes = original_notes.get("email", "")
+                if email_from_notes:
+                    attendee = db.query(models.Attendee).filter(
+                        models.Attendee.event_id == payment.event_id,
+                        models.Attendee.email == email_from_notes
+                    ).first()
+                
+                # Try by roll_number from original_notes
+                if not attendee:
+                    roll_number = original_notes.get("roll_number", "")
+                    if roll_number:
+                        attendee = db.query(models.Attendee).filter(
+                            models.Attendee.event_id == payment.event_id,
+                            models.Attendee.roll_number == roll_number
+                        ).first()
+                
+                # Try by customer_email as fallback
+                if not attendee and payment.customer_email:
+                    attendee = db.query(models.Attendee).filter(
+                        models.Attendee.event_id == payment.event_id,
+                        models.Attendee.email == payment.customer_email
+                    ).first()
+                
+                if not attendee:
+                    print(f"    ⚠️ No attendee found for email: {email_from_notes} or roll: {original_notes.get('roll_number', 'N/A')}")
+                    continue
+                
+                # Check if update is needed
+                needs_update = False
+                updates = {}
+                
+                if attendee.year != year:
+                    updates['year'] = year
+                    needs_update = True
+                
+                if attendee.section != section:
+                    updates['section'] = section
+                    needs_update = True
+                
+                if not needs_update:
+                    print(f"    ✅ Attendee {attendee.id} ({attendee.name}) already has correct data")
+                    continue
+                
+                # Show what will be updated
+                print(f"    👤 Attendee: {attendee.name} (ID: {attendee.id})")
+                print(f"    📧 Email: {attendee.email}")
+                print(f"    🎓 Roll: {attendee.roll_number}")
+                print(f"    📝 Payment form data: {original_notes}")
+                print(f"    📊 Current: Year={attendee.year}, Section={attendee.section}")
+                print(f"    🆕 New: {updates}")
+                
+                # Apply updates
+                for field, value in updates.items():
+                    setattr(attendee, field, value)
+                
+                db.commit()
+                updated_count += 1
+                print(f"    ✅ Updated attendee {attendee.id}: {updates}")
                 
             except Exception as e:
                 error_msg = f"Error processing payment {payment.id}: {str(e)}"
                 errors.append(error_msg)
-                print(f"❌ {error_msg}")
+                print(f"    ❌ {error_msg}")
         
         # Log activity
         log_activity(
@@ -2334,6 +2531,7 @@ async def fix_attendee_details_from_payments(
         return {
             "success": True,
             "message": f"Fixed attendee details for {updated_count} attendees",
+            "processed_payments": processed_count,
             "updated_count": updated_count,
             "errors": errors[:10],  # Return first 10 errors
             "timestamp": datetime.now(ist).isoformat()
@@ -2535,5 +2733,122 @@ async def health_check(db: Session = Depends(get_db)):
         return {
             "status": "unhealthy",
             "database": "disconnected",
+            "error": str(e)
+        }
+
+
+@app.get("/api/system/status")
+async def system_status(
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    System status check - identifies potential issues and edge cases
+    """
+    try:
+        issues = []
+        warnings = []
+        
+        # Check for attendees without QR codes
+        attendees_without_qr = db.query(models.Attendee).filter(
+            models.Attendee.qr_token.is_(None)
+        ).count()
+        
+        if attendees_without_qr > 0:
+            warnings.append(f"{attendees_without_qr} attendees without QR codes")
+        
+        # Check for attendees with QR but no email sent
+        attendees_without_email = db.query(models.Attendee).filter(
+            models.Attendee.qr_generated == True,
+            models.Attendee.email_sent == False
+        ).count()
+        
+        if attendees_without_email > 0:
+            warnings.append(f"{attendees_without_email} attendees with QR codes but emails not sent")
+        
+        # Check for duplicate attendees (same email or roll number in same event)
+        from sqlalchemy import func
+        duplicate_emails = db.query(
+            models.Attendee.event_id,
+            models.Attendee.email,
+            func.count(models.Attendee.id).label('count')
+        ).group_by(
+            models.Attendee.event_id,
+            models.Attendee.email
+        ).having(func.count(models.Attendee.id) > 1).all()
+        
+        if duplicate_emails:
+            issues.append(f"{len(duplicate_emails)} events have duplicate attendees by email")
+        
+        duplicate_rolls = db.query(
+            models.Attendee.event_id,
+            models.Attendee.roll_number,
+            func.count(models.Attendee.id).label('count')
+        ).group_by(
+            models.Attendee.event_id,
+            models.Attendee.roll_number
+        ).having(func.count(models.Attendee.id) > 1).all()
+        
+        if duplicate_rolls:
+            issues.append(f"{len(duplicate_rolls)} events have duplicate attendees by roll number")
+        
+        # Check for payments without corresponding attendees
+        payments_without_attendees = db.query(models.Payment).filter(
+            models.Payment.status == "captured",
+            models.Payment.attendee_id.is_(None)
+        ).count()
+        
+        if payments_without_attendees > 0:
+            warnings.append(f"{payments_without_attendees} captured payments without corresponding attendees")
+        
+        # Check for email failures
+        email_failures = db.query(models.Attendee).filter(
+            models.Attendee.email_error.isnot(None)
+        ).count()
+        
+        if email_failures > 0:
+            warnings.append(f"{email_failures} attendees with email sending errors")
+        
+        # Check for attendees with invalid year/section
+        invalid_years = db.query(models.Attendee).filter(
+            (models.Attendee.year < 1) | (models.Attendee.year > 4)
+        ).count()
+        
+        if invalid_years > 0:
+            issues.append(f"{invalid_years} attendees with invalid year values")
+        
+        invalid_sections = db.query(models.Attendee).filter(
+            ~models.Attendee.section.in_(['A', 'B', 'C', 'D'])
+        ).count()
+        
+        if invalid_sections > 0:
+            issues.append(f"{invalid_sections} attendees with invalid section values")
+        
+        # Overall status
+        status = "healthy"
+        if issues:
+            status = "issues_found"
+        elif warnings:
+            status = "warnings_found"
+        
+        return {
+            "status": status,
+            "issues": issues,
+            "warnings": warnings,
+            "summary": {
+                "attendees_without_qr": attendees_without_qr,
+                "attendees_without_email": attendees_without_email,
+                "duplicate_emails": len(duplicate_emails),
+                "duplicate_rolls": len(duplicate_rolls),
+                "payments_without_attendees": payments_without_attendees,
+                "email_failures": email_failures,
+                "invalid_years": invalid_years,
+                "invalid_sections": invalid_sections
+            }
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
             "error": str(e)
         }

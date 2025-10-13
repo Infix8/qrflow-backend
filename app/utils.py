@@ -7,7 +7,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from jose import jwt
 from .config import settings
 from typing import Optional
@@ -26,7 +26,7 @@ def generate_qr_token(event_id: int, attendee_id: int, email: str, roll_number: 
         "attendee_id": attendee_id,
         "email": email,
         "roll_number": roll_number,
-        "issued_at": datetime.utcnow().isoformat(),
+        "issued_at": datetime.now(timezone.utc).isoformat(),
         "exp": expire
     }
     
